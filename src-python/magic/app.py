@@ -32,13 +32,21 @@ def status():
     return {"status": "running"}
 
 
-@app.post("/prepare")
+@app.route("/prepare", method=["POST", "OPTIONS"])
 def prepare():
+    # 处理 OPTIONS 预检请求
+    if request.method == "OPTIONS":
+        return {}
+    
     return {"success": load_models()}
 
 
-@app.post("/task")
+@app.route("/task", method=["POST", "OPTIONS"])
 def create_task():
+    # 处理 OPTIONS 预检请求
+    if request.method == "OPTIONS":
+        return {}
+    
     try:
         task_id = request.json["id"]
         input_image = request.json["inputImage"]
@@ -53,8 +61,12 @@ def create_task():
         return {"error": "Something went wrong!"}
 
 
-@app.post("/task/video")
+@app.route("/task/video", method=["POST", "OPTIONS"])
 def create_video_task():
+    # 处理 OPTIONS 预检请求
+    if request.method == "OPTIONS":
+        return {}
+    
     try:
         task_id = request.json["id"]
         input_video = request.json["inputVideo"]
