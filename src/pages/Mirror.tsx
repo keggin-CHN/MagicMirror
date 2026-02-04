@@ -1,5 +1,6 @@
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useSwapFace } from "@/hooks/useSwapFace";
+import { isImageFile, isVideoFile } from "@/services/utils";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { exit } from "@tauri-apps/plugin-process";
 import { open } from "@tauri-apps/plugin-shell";
@@ -12,10 +13,10 @@ import iconMenu from "@/assets/images/menu.webp";
 import background from "@/assets/images/mirror-bg.svg";
 import mirrorInput from "@/assets/images/mirror-input.webp";
 import mirrorMe from "@/assets/images/mirror-me.webp";
-
 interface Asset {
   path: string;
   src: string;
+  type?: "image" | "video";
 }
 
 const kMirrorStates: {
@@ -32,8 +33,9 @@ export function MirrorPage() {
 
   const { i18n, t } = useTranslation();
 
-  const { isSwapping, swapFace } = useSwapFace();
+  const { isSwapping, swapFace, swapVideo } = useSwapFace();
   const [success, setSuccess] = useState(true);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setTimeout(() => {
@@ -49,33 +51,50 @@ export function MirrorPage() {
   }, [kMirrorStates.me, kMirrorStates.input, isSwapping]);
 
   const { ref } = useDragDrop(async (paths) => {
-    const src = convertFileSrc(paths[0]);
+    const path = paths[0];
+    const src = convertFileSrc(path);
+    const isVideo = isVideoFile(path);
+    const isImage = isImageFile(path);
+
     if (kMirrorStates.isMe) {
+      if (!isImage) {
+        setNotice(t("Please use an image for your face photo."));
+        return;
+      }
       kMirrorStates.me = {
         src,
-        path: paths[0],
+        path,
+        type: "image",
       };
+      setNotice(null);
       rebuild.current();
     } else {
+      if (!isImage && !isVideo) {
+        setNotice(t("Unsupported file type."));
+        return;
+      }
       kMirrorStates.input = {
         src,
-        path: paths[0],
+        path,
+        type: isVideo ? "video" : "image",
       };
+      setNotice(null);
       rebuild.current();
     }
 
     if (kMirrorStates.me && kMirrorStates.input) {
       kMirrorStates.result = undefined;
       rebuild.current();
-      const result = await swapFace(
-        kMirrorStates.input.path,
-        kMirrorStates.me.path
-      );
+      const isVideoTask = kMirrorStates.input.type === "video";
+      const result = isVideoTask
+        ? await swapVideo(kMirrorStates.input.path, kMirrorStates.me.path)
+        : await swapFace(kMirrorStates.input.path, kMirrorStates.me.path);
       setSuccess(result != null);
       if (result) {
         kMirrorStates.result = {
           src: convertFileSrc(result),
           path: result,
+          type: isVideoTask ? "video" : "image",
         };
         rebuild.current();
       }
@@ -83,15 +102,32 @@ export function MirrorPage() {
   });
 
   const isReady = kMirrorStates.me && kMirrorStates.input;
-  const tips = kMirrorStates.isMe
-    ? t("First, drag your front-facing photo into the mirror.")
-    : !isReady
-    ? t("Then, drag the photo you want to swap faces with into the mirror.")
-    : isSwapping
-    ? t("Face swapping... This may take a few seconds, please wait.")
-    : success
-    ? t("Face swap successful! Image saved locally.")
-    : t("Face swap failed. Try a different image.");
+  const isVideoInput = kMirrorStates.input?.type === "video";
+  const tips = notice
+    ? notice
+    : kMirrorStates.isMe
+      ? t("First, drag your front-facing photo into the mirror.")
+      : !isReady
+        ? t("Then, drag the photo you want to swap faces with into the mirror.")
+        : isSwapping
+          ? isVideoInput
+            ? t("Video swapping... This may take a while, please wait.")
+            : t("Face swapping... This may take a few seconds, please wait.")
+          : success
+            ? isVideoInput
+              ? t("Face swap successful! Video saved locally.")
+              : t("Face swap successful! Image saved locally.")
+            : isVideoInput
+              ? t("Video face swap failed. Try a different video.")
+              : t("Face swap failed. Try a different image.");
+
+  const previewSrc = kMirrorStates.isMe
+    ? kMirrorStates.me?.src || background
+    : kMirrorStates.result?.src || kMirrorStates.input?.src || background;
+
+  const previewType = kMirrorStates.isMe
+    ? "image"
+    : kMirrorStates.result?.type || kMirrorStates.input?.type || "image";
 
   return (
     <div className="w-100vw h-100vh p-40px">
@@ -150,17 +186,23 @@ export function MirrorPage() {
         >
           <div className="mirror-preview">
             <div className="preview-container">
-              <img
-                data-tauri-drag-region
-                src={
-                  kMirrorStates.isMe
-                    ? kMirrorStates.me?.src || background
-                    : kMirrorStates.result?.src ||
-                      kMirrorStates.input?.src ||
-                      background
-                }
-                className="rd-50% w-full h-full object-cover bg-black"
-              />
+              {previewType === "video" ? (
+                <video
+                  data-tauri-drag-region
+                  src={previewSrc}
+                  className="rd-50% w-full h-full object-cover bg-black"
+                  autoPlay
+                  loop
+                  muted
+                  playsInline
+                />
+              ) : (
+                <img
+                  data-tauri-drag-region
+                  src={previewSrc}
+                  className="rd-50% w-full h-full object-cover bg-black"
+                />
+              )}
             </div>
           </div>
         </div>

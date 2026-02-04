@@ -14,8 +14,8 @@ export function useSwapFace() {
   const [isSwapping, setIsSwapping] = useXState("isSwapping", false);
   const [output, setOutput] = useXState<string | null>("swapOutput", null);
 
-  const swapFace = useCallback(
-    async (inputImage: string, targetFace: string) => {
+  const runTask = useCallback(
+    async (create: (taskId: string) => Promise<string | null>) => {
       await kSwapFaceRefs.cancel?.();
       setIsSwapping(true);
       const taskId = (kSwapFaceRefs.id++).toString();
@@ -25,17 +25,39 @@ export function useSwapFace() {
           setIsSwapping(false);
         }
       };
-      const result = await Server.createTask({
-        id: taskId,
-        inputImage,
-        targetFace,
-      });
+      const result = await create(taskId);
       kSwapFaceRefs.cancel = undefined;
       setOutput(result);
       setIsSwapping(false);
       return result;
     },
     []
+  );
+
+  const swapFace = useCallback(
+    async (inputImage: string, targetFace: string) => {
+      return runTask((taskId: string) =>
+        Server.createTask({
+          id: taskId,
+          inputImage,
+          targetFace,
+        })
+      );
+    },
+    [runTask]
+  );
+
+  const swapVideo = useCallback(
+    async (inputVideo: string, targetFace: string) => {
+      return runTask((taskId: string) =>
+        Server.createVideoTask({
+          id: taskId,
+          inputVideo,
+          targetFace,
+        })
+      );
+    },
+    [runTask]
   );
 
   useEffect(() => {
@@ -48,6 +70,7 @@ export function useSwapFace() {
     isSwapping,
     output,
     swapFace,
+    swapVideo,
     cancel: () => kSwapFaceRefs.cancel?.(),
   };
 }

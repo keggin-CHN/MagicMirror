@@ -31,6 +31,69 @@ def swap_face(input_path, face_path):
         return None
 
 
+def swap_face_video(input_path, face_path):
+    try:
+        save_path = _get_output_video_path(input_path)
+        output_path = _swap_face_video(input_path, face_path, save_path)
+        return output_path
+    except BaseException as _:
+        return None
+
+
+def _swap_face_video(input_path, face_path, save_path):
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        return None
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 25.0
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+
+    if width <= 0 or height <= 0:
+        ok, frame = cap.read()
+        if not ok:
+            cap.release()
+            return None
+        height, width = frame.shape[:2]
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(save_path, fourcc, fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        return None
+
+    destination_face = _get_one_face(face_path)
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if destination_face is None:
+            writer.write(frame)
+            continue
+        try:
+            reference_face = _tf.get_one_face(frame)
+            if reference_face is None:
+                writer.write(frame)
+                continue
+            output_frame = _tf.swap_face(
+                vision_frame=frame,
+                reference_face=reference_face,
+                destination_face=destination_face,
+            )
+            writer.write(output_frame if output_frame is not None else frame)
+        except BaseException:
+            writer.write(frame)
+
+    cap.release()
+    writer.release()
+    return save_path
+
+
 @lru_cache(maxsize=12)
 def _swap_face(input_path, face_path):
     return _tf.swap_face(
@@ -59,6 +122,11 @@ def _write_image(img_path: str, img):
 def _get_output_file_path(file_name):
     base_name, ext = os.path.splitext(file_name)
     return base_name + "_output" + ext
+
+
+def _get_output_video_path(file_name):
+    base_name, _ = os.path.splitext(file_name)
+    return base_name + "_output.mp4"
 
 
 def _get_model_path(file_name: str):

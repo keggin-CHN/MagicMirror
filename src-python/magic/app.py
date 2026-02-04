@@ -3,7 +3,7 @@ import json
 from async_tasks import AsyncTask
 from bottle import Bottle, request, response
 
-from .face import load_models, swap_face
+from .face import load_models, swap_face, swap_face_video
 
 app = Bottle()
 
@@ -46,6 +46,22 @@ def create_task():
         assert all([task_id, input_image, target_face])
         res, _ = AsyncTask.run(
             lambda: swap_face(input_image, target_face), task_id=task_id
+        )
+        return {"result": res}
+    except BaseException:
+        response.status = 400
+        return {"error": "Something went wrong!"}
+
+
+@app.post("/task/video")
+def create_video_task():
+    try:
+        task_id = request.json["id"]
+        input_video = request.json["inputVideo"]
+        target_face = request.json["targetFace"]
+        assert all([task_id, input_video, target_face])
+        res, _ = AsyncTask.run(
+            lambda: swap_face_video(input_video, target_face), task_id=task_id
         )
         return {"result": res}
     except BaseException:

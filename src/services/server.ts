@@ -12,6 +12,12 @@ export interface Task {
   targetFace: string;
 }
 
+export interface VideoTask {
+  id: string;
+  inputVideo: string;
+  targetFace: string;
+}
+
 class _Server {
   _childProcess?: Child;
   _baseURL = "http://localhost:8023";
@@ -109,6 +115,22 @@ class _Server {
   async createTask(task: Task): Promise<string | null> {
     try {
       const res = await fetch(`${this._baseURL}/task`, {
+        method: "post",
+        headers: {
+          "Content-Type": "application/json;charset=UTF-8",
+        },
+        body: JSON.stringify(task),
+      });
+      const data = await res.json();
+      return data.result || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async createVideoTask(task: VideoTask): Promise<string | null> {
+    try {
+      const res = await fetch(`${this._baseURL}/task/video`, {
         method: "post",
         headers: {
           "Content-Type": "application/json;charset=UTF-8",
