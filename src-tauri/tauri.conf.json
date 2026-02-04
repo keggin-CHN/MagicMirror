@@ -31,12 +31,15 @@
       "csp": {
         "default-src": "'self' asset:",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "media-src": "'self' asset: http://asset.localhost blob: data:",
         "connect-src": "tauri: http://tauri.localhost ipc: http://ipc.localhost http://localhost:8023"
       },
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["**"]
+          "allow": [
+            "**"
+          ]
         }
       }
     }
@@ -83,7 +86,10 @@
         "headerImage": "images/nsis_header.bmp",
         "sidebarImage": "images/nsis_sidebar.bmp",
         "installerIcon": "icons/icon.ico",
-        "languages": ["English", "SimpChinese"]
+        "languages": [
+          "English",
+          "SimpChinese"
+        ]
       }
     }
   }
