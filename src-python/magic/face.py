@@ -1,4 +1,5 @@
 import os
+import traceback
 from functools import lru_cache
 
 import cv2
@@ -6,6 +7,16 @@ import numpy as np
 from tinyface import TinyFace
 
 _tf = TinyFace()
+
+
+def _log_error(context: str, error: Exception):
+    """记录详细的错误信息"""
+    error_msg = f"[ERROR] {context}\n"
+    error_msg += f"错误类型: {type(error).__name__}\n"
+    error_msg += f"错误信息: {str(error)}\n"
+    error_msg += f"堆栈跟踪:\n{traceback.format_exc()}"
+    print(error_msg)
+    return error_msg
 
 
 def load_models():
@@ -33,65 +44,131 @@ def swap_face(input_path, face_path):
 
 def swap_face_video(input_path, face_path):
     try:
+        print(f"[INFO] 开始视频换脸: input={input_path}, face={face_path}")
+        
+        # 检查输入文件是否存在
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"输入视频文件不存在: {input_path}")
+        if not os.path.exists(face_path):
+            raise FileNotFoundError(f"人脸图片文件不存在: {face_path}")
+        
         save_path = _get_output_video_path(input_path)
+        print(f"[INFO] 输出路径: {save_path}")
+        
         output_path = _swap_face_video(input_path, face_path, save_path)
-        return output_path
-    except BaseException as _:
+        
+        if output_path and os.path.exists(output_path):
+            print(f"[SUCCESS] 视频换脸成功: {output_path}")
+            return output_path
+        else:
+            print(f"[ERROR] 视频换脸失败: 输出文件不存在")
+            return None
+            
+    except Exception as e:
+        _log_error("swap_face_video", e)
         return None
 
 
 def _swap_face_video(input_path, face_path, save_path):
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        return None
+    cap = None
+    writer = None
+    
+    try:
+        print(f"[INFO] 打开视频文件: {input_path}")
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"无法打开视频文件: {input_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not fps or fps <= 0:
-        fps = 25.0
+        # 获取视频属性
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0:
+            fps = 25.0
+            print(f"[WARN] 无法获取视频FPS，使用默认值: {fps}")
+        else:
+            print(f"[INFO] 视频FPS: {fps}")
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        
+        print(f"[INFO] 视频尺寸: {width}x{height}, 总帧数: {total_frames}")
 
-    if width <= 0 or height <= 0:
-        ok, frame = cap.read()
-        if not ok:
-            cap.release()
-            return None
-        height, width = frame.shape[:2]
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        if width <= 0 or height <= 0:
+            print(f"[WARN] 无法获取视频尺寸，尝试读取第一帧")
+            ok, frame = cap.read()
+            if not ok:
+                raise RuntimeError("无法读取视频第一帧")
+            height, width = frame.shape[:2]
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            print(f"[INFO] 从第一帧获取尺寸: {width}x{height}")
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(save_path, fourcc, fps, (width, height))
-    if not writer.isOpened():
-        cap.release()
-        return None
+        # 创建视频写入器
+        print(f"[INFO] 创建输出视频: {save_path}")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(save_path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            raise RuntimeError(f"无法创建输出视频文件: {save_path}")
 
-    destination_face = _get_one_face(face_path)
-
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
+        # 提取目标人脸
+        print(f"[INFO] 提取目标人脸: {face_path}")
+        destination_face = _get_one_face(face_path)
         if destination_face is None:
-            writer.write(frame)
-            continue
-        try:
-            reference_face = _tf.get_one_face(frame)
-            if reference_face is None:
-                writer.write(frame)
-                continue
-            output_frame = _tf.swap_face(
-                vision_frame=frame,
-                reference_face=reference_face,
-                destination_face=destination_face,
-            )
-            writer.write(output_frame if output_frame is not None else frame)
-        except BaseException:
-            writer.write(frame)
+            raise RuntimeError(f"无法从图片中检测到人脸: {face_path}")
+        print(f"[SUCCESS] 成功提取目标人脸")
 
-    cap.release()
-    writer.release()
-    return save_path
+        # 逐帧处理
+        frame_count = 0
+        processed_count = 0
+        failed_count = 0
+        
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            
+            frame_count += 1
+            if frame_count % 30 == 0:  # 每30帧打印一次进度
+                progress = (frame_count / total_frames * 100) if total_frames > 0 else 0
+                print(f"[PROGRESS] 处理进度: {frame_count}/{total_frames} ({progress:.1f}%)")
+            
+            try:
+                reference_face = _tf.get_one_face(frame)
+                if reference_face is None:
+                    writer.write(frame)
+                    failed_count += 1
+                    continue
+                    
+                output_frame = _tf.swap_face(
+                    vision_frame=frame,
+                    reference_face=reference_face,
+                    destination_face=destination_face,
+                )
+                writer.write(output_frame if output_frame is not None else frame)
+                processed_count += 1
+                
+            except Exception as e:
+                print(f"[WARN] 第{frame_count}帧处理失败: {str(e)}")
+                writer.write(frame)
+                failed_count += 1
+
+        print(f"[INFO] 视频处理完成:")
+        print(f"  - 总帧数: {frame_count}")
+        print(f"  - 成功换脸: {processed_count}")
+        print(f"  - 跳过/失败: {failed_count}")
+        
+        return save_path
+        
+    except Exception as e:
+        _log_error("_swap_face_video", e)
+        return None
+        
+    finally:
+        if cap is not None:
+            cap.release()
+            print(f"[INFO] 释放视频读取器")
+        if writer is not None:
+            writer.release()
+            print(f"[INFO] 释放视频写入器")
 
 
 @lru_cache(maxsize=12)

@@ -59,14 +59,32 @@ def create_video_task():
         task_id = request.json["id"]
         input_video = request.json["inputVideo"]
         target_face = request.json["targetFace"]
-        assert all([task_id, input_video, target_face])
+        
+        print(f"[API] 收到视频换脸请求:")
+        print(f"  - task_id: {task_id}")
+        print(f"  - input_video: {input_video}")
+        print(f"  - target_face: {target_face}")
+        
+        assert all([task_id, input_video, target_face]), "缺少必要参数"
+        
         res, _ = AsyncTask.run(
             lambda: swap_face_video(input_video, target_face), task_id=task_id
         )
-        return {"result": res}
-    except BaseException:
+        
+        if res:
+            print(f"[API] 视频换脸任务完成: {res}")
+            return {"result": res}
+        else:
+            print(f"[API] 视频换脸任务失败")
+            response.status = 500
+            return {"error": "视频换脸处理失败，请查看服务端日志"}
+            
+    except Exception as e:
+        import traceback
+        error_msg = f"视频换脸API错误: {str(e)}\n{traceback.format_exc()}"
+        print(f"[ERROR] {error_msg}")
         response.status = 400
-        return {"error": "Something went wrong!"}
+        return {"error": error_msg}
 
 
 @app.delete("/task/<task_id>")

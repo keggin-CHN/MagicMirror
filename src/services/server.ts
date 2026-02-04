@@ -130,6 +130,7 @@ class _Server {
 
   async createVideoTask(task: VideoTask): Promise<string | null> {
     try {
+      console.log("[Server] 发送视频换脸请求:", task);
       const res = await fetch(`${this._baseURL}/task/video`, {
         method: "post",
         headers: {
@@ -137,9 +138,24 @@ class _Server {
         },
         body: JSON.stringify(task),
       });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error(`[Server] 视频换脸请求失败 (${res.status}):`, errorText);
+        return null;
+      }
+
       const data = await res.json();
+      console.log("[Server] 视频换脸响应:", data);
+
+      if (data.error) {
+        console.error("[Server] 服务端返回错误:", data.error);
+        return null;
+      }
+
       return data.result || null;
-    } catch {
+    } catch (error) {
+      console.error("[Server] 视频换脸请求异常:", error);
       return null;
     }
   }
