@@ -3,7 +3,7 @@ import json
 from async_tasks import AsyncTask
 from bottle import Bottle, request, response
 
-from .face import load_models, swap_face, swap_face_video
+from .face import load_models, swap_face, swap_face_regions, swap_face_video
 
 app = Bottle()
 
@@ -51,10 +51,17 @@ def create_task():
         task_id = request.json["id"]
         input_image = request.json["inputImage"]
         target_face = request.json["targetFace"]
+        regions = request.json.get("regions")
         assert all([task_id, input_image, target_face])
-        res, _ = AsyncTask.run(
-            lambda: swap_face(input_image, target_face), task_id=task_id
-        )
+        if regions:
+            res, _ = AsyncTask.run(
+                lambda: swap_face_regions(input_image, target_face, regions),
+                task_id=task_id,
+            )
+        else:
+            res, _ = AsyncTask.run(
+                lambda: swap_face(input_image, target_face), task_id=task_id
+            )
         return {"result": res}
     except BaseException:
         response.status = 400

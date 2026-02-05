@@ -6,16 +6,29 @@ import { t } from "i18next";
 
 export type ServerStatus = "idle" | "launching" | "running";
 
+export interface Region {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface Task {
   id: string;
   inputImage: string;
   targetFace: string;
+  regions?: Region[];
 }
 
 export interface VideoTask {
   id: string;
   inputVideo: string;
   targetFace: string;
+}
+
+export interface TaskResult {
+  result: string | null;
+  error?: string;
 }
 
 class _Server {
@@ -112,7 +125,7 @@ class _Server {
     }
   }
 
-  async createTask(task: Task): Promise<string | null> {
+  async createTask(task: Task): Promise<TaskResult> {
     try {
       const res = await fetch(`${this._baseURL}/task`, {
         method: "post",
@@ -121,14 +134,27 @@ class _Server {
         },
         body: JSON.stringify(task),
       });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error(`[Server] 图片换脸请求失败 (${res.status}):`, errorText);
+        return { result: null, error: `http-${res.status}` };
+      }
+
       const data = await res.json();
-      return data.result || null;
-    } catch {
-      return null;
+      if (data.error) {
+        console.error("[Server] 服务端返回错误:", data.error);
+        return { result: null, error: data.error };
+      }
+
+      return { result: data.result || null };
+    } catch (error) {
+      console.error("[Server] 图片换脸请求异常:", error);
+      return { result: null, error: "network" };
     }
   }
 
-  async createVideoTask(task: VideoTask): Promise<string | null> {
+  async createVideoTask(task: VideoTask): Promise<TaskResult> {
     try {
       console.log("[Server] 发送视频换脸请求:", task);
       const res = await fetch(`${this._baseURL}/task/video`, {
@@ -139,10 +165,16 @@ class _Server {
         body: JSON.stringify(task),
       });
 
+      if (res.status === 405) {
+        const errorText = await res.text();
+        console.error(`[Server] 视频换脸接口不支持 (${res.status}):`, errorText);
+        return { result: null, error: "video-not-supported" };
+      }
+
       if (!res.ok) {
         const errorText = await res.text();
         console.error(`[Server] 视频换脸请求失败 (${res.status}):`, errorText);
-        return null;
+        return { result: null, error: `http-${res.status}` };
       }
 
       const data = await res.json();
@@ -150,13 +182,13 @@ class _Server {
 
       if (data.error) {
         console.error("[Server] 服务端返回错误:", data.error);
-        return null;
+        return { result: null, error: data.error };
       }
 
-      return data.result || null;
+      return { result: data.result || null };
     } catch (error) {
       console.error("[Server] 视频换脸请求异常:", error);
-      return null;
+      return { result: null, error: "network" };
     }
   }
 

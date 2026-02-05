@@ -42,6 +42,50 @@ def swap_face(input_path, face_path):
         return None
 
 
+def swap_face_regions(input_path, face_path, regions):
+    try:
+        save_path = _get_output_file_path(input_path)
+        input_img = _read_image(input_path)
+        height, width = input_img.shape[:2]
+        normalized_regions = _normalize_regions(regions, width, height)
+        if not normalized_regions:
+            output_img = _swap_face(input_path, face_path)
+            if output_img is None:
+                return None
+            _write_image(save_path, output_img)
+            return save_path
+
+        destination_face = _get_one_face(face_path)
+        if destination_face is None:
+            raise RuntimeError(f"无法从图片中检测到人脸: {face_path}")
+
+        output_img = input_img.copy()
+        swapped_count = 0
+        for x, y, w, h in normalized_regions:
+            crop = input_img[y : y + h, x : x + w]
+            reference_face = _tf.get_one_face(crop)
+            if reference_face is None:
+                continue
+            output_crop = _tf.swap_face(
+                vision_frame=crop,
+                reference_face=reference_face,
+                destination_face=destination_face,
+            )
+            if output_crop is None:
+                continue
+            output_img[y : y + h, x : x + w] = output_crop
+            swapped_count += 1
+
+        if swapped_count == 0:
+            return None
+
+        _write_image(save_path, output_img)
+        return save_path
+    except Exception as e:
+        _log_error("swap_face_regions", e)
+        return None
+
+
 def swap_face_video(input_path, face_path):
     try:
         print(f"[INFO] 开始视频换脸: input={input_path}, face={face_path}")
@@ -188,12 +232,45 @@ def _get_one_face(face_path: str):
 
 @lru_cache(maxsize=12)
 def _read_image(img_path: str):
-    return cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), -1)
+    data = np.fromfile(img_path, dtype=np.uint8)
+    img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise RuntimeError(f"无法读取图片文件: {img_path}")
+    # PNG 可能带 Alpha 或灰度通道，TinyFace 通常期望 BGR 3 通道
+    if len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return img
 
 
 def _write_image(img_path: str, img):
     suffix = os.path.splitext(img_path)[-1]
     cv2.imencode(suffix, img)[1].tofile(img_path)
+
+
+def _normalize_regions(regions, width, height):
+    normalized = []
+    if not regions:
+        return normalized
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        try:
+            x = int(region.get("x", 0))
+            y = int(region.get("y", 0))
+            w = int(region.get("width", 0))
+            h = int(region.get("height", 0))
+        except (TypeError, ValueError):
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        x = max(0, min(x, width - 1))
+        y = max(0, min(y, height - 1))
+        w = max(1, min(w, width - x))
+        h = max(1, min(h, height - y))
+        normalized.append((x, y, w, h))
+    return normalized
 
 
 def _get_output_file_path(file_name):
