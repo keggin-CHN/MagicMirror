@@ -1,4 +1,7 @@
 import os
+import shutil
+import subprocess
+import threading
 import traceback
 from functools import lru_cache
 
@@ -7,6 +10,7 @@ import numpy as np
 from tinyface import TinyFace
 
 _tf = TinyFace()
+_tf_lock = threading.RLock()
 
 
 def _log_error(context: str, error: Exception):
@@ -33,13 +37,9 @@ def load_models():
 
 @lru_cache(maxsize=12)
 def swap_face(input_path, face_path):
-    try:
-        save_path = _get_output_file_path(input_path)
-        output_img = _swap_face(input_path, face_path)
-        _write_image(save_path, output_img)
-        return save_path
-    except BaseException as _:
-        return None
+    save_path = _get_output_file_path(input_path)
+    output_img = _swap_face(input_path, face_path)
+    return _write_image(save_path, output_img)
 
 
 def swap_face_regions(input_path, face_path, regions):
@@ -48,80 +48,89 @@ def swap_face_regions(input_path, face_path, regions):
         input_img = _read_image(input_path)
         height, width = input_img.shape[:2]
         normalized_regions = _normalize_regions(regions, width, height)
+
+        # 未选择/无有效选区：回退全图换脸
         if not normalized_regions:
             output_img = _swap_face(input_path, face_path)
-            if output_img is None:
-                return None
-            _write_image(save_path, output_img)
-            return save_path
+            return _write_image(save_path, output_img)
 
         destination_face = _get_one_face(face_path)
         if destination_face is None:
-            raise RuntimeError(f"无法从图片中检测到人脸: {face_path}")
+            raise RuntimeError("no-face-detected")
 
         output_img = input_img.copy()
         swapped_count = 0
+
         for x, y, w, h in normalized_regions:
             crop = input_img[y : y + h, x : x + w]
-            reference_face = _tf.get_one_face(crop)
+            with _tf_lock:
+                reference_face = _tf.get_one_face(crop)
             if reference_face is None:
                 continue
-            output_crop = _tf.swap_face(
-                vision_frame=crop,
-                reference_face=reference_face,
-                destination_face=destination_face,
-            )
+
+            with _tf_lock:
+                output_crop = _tf.swap_face(
+                    vision_frame=crop,
+                    reference_face=reference_face,
+                    destination_face=destination_face,
+                )
             if output_crop is None:
                 continue
+
             output_img[y : y + h, x : x + w] = output_crop
             swapped_count += 1
 
         if swapped_count == 0:
-            return None
+            raise RuntimeError("no-face-in-selected-regions")
 
-        _write_image(save_path, output_img)
-        return save_path
+        return _write_image(save_path, output_img)
+
     except Exception as e:
         _log_error("swap_face_regions", e)
-        return None
+        raise
 
 
 def swap_face_video(input_path, face_path):
     try:
         print(f"[INFO] 开始视频换脸: input={input_path}, face={face_path}")
-        
+
         # 检查输入文件是否存在
         if not os.path.exists(input_path):
-            raise FileNotFoundError(f"输入视频文件不存在: {input_path}")
+            raise FileNotFoundError("file-not-found")
         if not os.path.exists(face_path):
-            raise FileNotFoundError(f"人脸图片文件不存在: {face_path}")
-        
+            raise FileNotFoundError("file-not-found")
+
         save_path = _get_output_video_path(input_path)
         print(f"[INFO] 输出路径: {save_path}")
-        
+
         output_path = _swap_face_video(input_path, face_path, save_path)
-        
-        if output_path and os.path.exists(output_path):
-            print(f"[SUCCESS] 视频换脸成功: {output_path}")
-            return output_path
-        else:
-            print(f"[ERROR] 视频换脸失败: 输出文件不存在")
-            return None
-            
+
+        if not output_path or not os.path.exists(output_path):
+            raise RuntimeError("video-output-missing")
+
+        # 尝试使用 ffmpeg 把原视频音频复用到输出（OpenCV 写入的视频默认没有音轨）
+        try:
+            _try_mux_audio(input_path, output_path)
+        except Exception as e:
+            print(f"[WARN] 音频复用失败，将返回无音轨视频: {str(e)}")
+
+        print(f"[SUCCESS] 视频换脸成功: {output_path}")
+        return output_path
+
     except Exception as e:
         _log_error("swap_face_video", e)
-        return None
+        raise
 
 
 def _swap_face_video(input_path, face_path, save_path):
     cap = None
     writer = None
-    
+
     try:
         print(f"[INFO] 打开视频文件: {input_path}")
         cap = cv2.VideoCapture(input_path)
         if not cap.isOpened():
-            raise RuntimeError(f"无法打开视频文件: {input_path}")
+            raise RuntimeError("video-open-failed")
 
         # 获取视频属性
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -134,14 +143,16 @@ def _swap_face_video(input_path, face_path, save_path):
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        
+
         print(f"[INFO] 视频尺寸: {width}x{height}, 总帧数: {total_frames}")
 
+        first_frame = None
         if width <= 0 or height <= 0:
-            print(f"[WARN] 无法获取视频尺寸，尝试读取第一帧")
+            print("[WARN] 无法获取视频尺寸，尝试读取第一帧")
             ok, frame = cap.read()
             if not ok:
-                raise RuntimeError("无法读取视频第一帧")
+                raise RuntimeError("video-open-failed")
+            first_frame = frame
             height, width = frame.shape[:2]
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             print(f"[INFO] 从第一帧获取尺寸: {width}x{height}")
@@ -151,83 +162,114 @@ def _swap_face_video(input_path, face_path, save_path):
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(save_path, fourcc, fps, (width, height))
         if not writer.isOpened():
-            raise RuntimeError(f"无法创建输出视频文件: {save_path}")
+            raise RuntimeError("video-write-failed")
 
         # 提取目标人脸
         print(f"[INFO] 提取目标人脸: {face_path}")
         destination_face = _get_one_face(face_path)
         if destination_face is None:
-            raise RuntimeError(f"无法从图片中检测到人脸: {face_path}")
-        print(f"[SUCCESS] 成功提取目标人脸")
+            raise RuntimeError("no-face-detected")
+        print("[SUCCESS] 成功提取目标人脸")
 
         # 逐帧处理
         frame_count = 0
         processed_count = 0
         failed_count = 0
-        
+
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            
+
             frame_count += 1
             if frame_count % 30 == 0:  # 每30帧打印一次进度
                 progress = (frame_count / total_frames * 100) if total_frames > 0 else 0
-                print(f"[PROGRESS] 处理进度: {frame_count}/{total_frames} ({progress:.1f}%)")
-            
+                print(
+                    f"[PROGRESS] 处理进度: {frame_count}/{total_frames} ({progress:.1f}%)"
+                )
+
             try:
-                reference_face = _tf.get_one_face(frame)
+                with _tf_lock:
+                    reference_face = _tf.get_one_face(frame)
                 if reference_face is None:
                     writer.write(frame)
                     failed_count += 1
                     continue
-                    
-                output_frame = _tf.swap_face(
-                    vision_frame=frame,
-                    reference_face=reference_face,
-                    destination_face=destination_face,
-                )
-                writer.write(output_frame if output_frame is not None else frame)
+
+                with _tf_lock:
+                    output_frame = _tf.swap_face(
+                        vision_frame=frame,
+                        reference_face=reference_face,
+                        destination_face=destination_face,
+                    )
+
+                out = output_frame if output_frame is not None else frame
+
+                # 防御：确保写入帧尺寸/通道匹配（部分模型/输入可能导致尺寸变化）
+                if out is None:
+                    out = frame
+                if len(out.shape) == 2:
+                    out = cv2.cvtColor(out, cv2.COLOR_GRAY2BGR)
+                elif out.shape[2] == 4:
+                    out = cv2.cvtColor(out, cv2.COLOR_BGRA2BGR)
+                if out.shape[1] != width or out.shape[0] != height:
+                    out = cv2.resize(out, (width, height), interpolation=cv2.INTER_LINEAR)
+                if out.dtype != np.uint8:
+                    out = cv2.normalize(out, None, 0, 255, cv2.NORM_MINMAX).astype(
+                        np.uint8
+                    )
+
+                writer.write(out)
                 processed_count += 1
-                
+
             except Exception as e:
                 print(f"[WARN] 第{frame_count}帧处理失败: {str(e)}")
                 writer.write(frame)
                 failed_count += 1
 
-        print(f"[INFO] 视频处理完成:")
+        print("[INFO] 视频处理完成:")
         print(f"  - 总帧数: {frame_count}")
         print(f"  - 成功换脸: {processed_count}")
         print(f"  - 跳过/失败: {failed_count}")
-        
+
         return save_path
-        
+
     except Exception as e:
         _log_error("_swap_face_video", e)
-        return None
-        
+        raise
+
     finally:
         if cap is not None:
             cap.release()
-            print(f"[INFO] 释放视频读取器")
+            print("[INFO] 释放视频读取器")
         if writer is not None:
             writer.release()
-            print(f"[INFO] 释放视频写入器")
+            print("[INFO] 释放视频写入器")
 
 
 @lru_cache(maxsize=12)
 def _swap_face(input_path, face_path):
-    return _tf.swap_face(
-        vision_frame=_read_image(input_path),
-        reference_face=_get_one_face(input_path),
-        destination_face=_get_one_face(face_path),
-    )
+    vision = _read_image(input_path)
+    reference_face = _get_one_face(input_path)
+    destination_face = _get_one_face(face_path)
+    if reference_face is None or destination_face is None:
+        raise RuntimeError("no-face-detected")
+    with _tf_lock:
+        out = _tf.swap_face(
+            vision_frame=vision,
+            reference_face=reference_face,
+            destination_face=destination_face,
+        )
+    if out is None:
+        raise RuntimeError("swap-failed")
+    return out
 
 
 @lru_cache(maxsize=12)
 def _get_one_face(face_path: str):
     face_img = _read_image(face_path)
-    return _tf.get_one_face(face_img)
+    with _tf_lock:
+        return _tf.get_one_face(face_img)
 
 
 @lru_cache(maxsize=12)
@@ -235,7 +277,12 @@ def _read_image(img_path: str):
     data = np.fromfile(img_path, dtype=np.uint8)
     img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
     if img is None:
-        raise RuntimeError(f"无法读取图片文件: {img_path}")
+        raise RuntimeError("image-decode-failed")
+
+    # 兼容 16-bit PNG/TIFF 等：统一转换成 uint8
+    if img.dtype != np.uint8:
+        img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
     # PNG 可能带 Alpha 或灰度通道，TinyFace 通常期望 BGR 3 通道
     if len(img.shape) == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -245,8 +292,27 @@ def _read_image(img_path: str):
 
 
 def _write_image(img_path: str, img):
-    suffix = os.path.splitext(img_path)[-1]
-    cv2.imencode(suffix, img)[1].tofile(img_path)
+    if img is None:
+        raise RuntimeError("swap-failed")
+
+    suffix = (os.path.splitext(img_path)[-1] or ".png").lower()
+
+    def _try_write(path: str, ext: str) -> bool:
+        ok, buf = cv2.imencode(ext, img)
+        if not ok or buf is None:
+            return False
+        buf.tofile(path)
+        return True
+
+    # 先按原扩展名写，失败则回退 PNG（避免 WebP/TIFF 等编码支持不完整导致无输出文件）
+    if _try_write(img_path, suffix):
+        return img_path
+
+    fallback_path = os.path.splitext(img_path)[0] + ".png"
+    if _try_write(fallback_path, ".png"):
+        return fallback_path
+
+    raise RuntimeError("output-write-failed")
 
 
 def _normalize_regions(regions, width, height):
@@ -281,6 +347,39 @@ def _get_output_file_path(file_name):
 def _get_output_video_path(file_name):
     base_name, _ = os.path.splitext(file_name)
     return base_name + "_output.mp4"
+
+
+def _try_mux_audio(input_video_path: str, output_video_path: str):
+    """如果系统中存在 ffmpeg，尝试把原视频音频复用到输出视频中（失败则忽略）。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return
+
+    tmp_path = os.path.splitext(output_video_path)[0] + "_mux_tmp.mp4"
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        output_video_path,
+        "-i",
+        input_video_path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-shortest",
+        tmp_path,
+    ]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr[-500:]}")
+
+    os.replace(tmp_path, output_video_path)
 
 
 def _get_model_path(file_name: str):

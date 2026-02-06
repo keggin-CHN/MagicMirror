@@ -1,7 +1,7 @@
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useSwapFace } from "@/hooks/useSwapFace";
 import { type Region } from "@/services/server";
-import { isImageFile, isVideoFile } from "@/services/utils";
+import { getFileExtension, isImageFile, isVideoFile } from "@/services/utils";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { exit } from "@tauri-apps/plugin-process";
 import { open } from "@tauri-apps/plugin-shell";
@@ -366,10 +366,17 @@ export function MirrorPage() {
     const src = convertFileSrc(path);
     const isVideo = isVideoFile(path);
     const isImage = isImageFile(path);
+    const ext = getFileExtension(path);
+
+    const isHeic = ext === ".heic" || ext === ".heif";
 
     if (kMirrorStates.isMe) {
       if (!isImage) {
-        setNotice(t("Please use an image for your face photo."));
+        setNotice(
+          isHeic
+            ? t("HEIC/HEIF is not supported. Please convert to JPG/PNG.")
+            : t("Please use an image for your face photo.")
+        );
         return;
       }
       kMirrorStates.me = {
@@ -381,7 +388,11 @@ export function MirrorPage() {
       rebuild.current();
     } else {
       if (!isImage && !isVideo) {
-        setNotice(t("Unsupported file type."));
+        setNotice(
+          isHeic
+            ? t("HEIC/HEIF is not supported. Please convert to JPG/PNG.")
+            : t("Unsupported file type.")
+        );
         return;
       }
       kMirrorStates.input = {
@@ -431,6 +442,28 @@ export function MirrorPage() {
         ? t("Click Start to swap selected areas.")
         : t("Draw boxes to select areas.")
       : null;
+
+  // Map error codes to user-friendly messages
+  const getSwapErrorMessage = (error: string | null): string | null => {
+    if (!error) return null;
+    const errorMap: Record<string, string> = {
+      "video-not-supported": t("Video face swap not supported. Please update server."),
+      "unsupported-image-format": t("Unsupported image format. Please use JPG/PNG/WebP/BMP/TIFF."),
+      "unsupported-video-format": t("Unsupported video format. Please use MP4/MOV/AVI/MKV/WEBM/M4V."),
+      "image-decode-failed": t("Failed to read image file. Please try converting to JPG/PNG."),
+      "file-not-found": t("File not found. Please reselect the file."),
+      "no-face-detected": t("No face detected in the photo."),
+      "no-face-in-selected-regions": t("No face detected in selected areas."),
+      "output-write-failed": t("Failed to save output file."),
+      "video-open-failed": t("Failed to open video file."),
+      "video-write-failed": t("Failed to write output video file."),
+      "video-output-missing": t("Video swap failed. Output file missing."),
+    };
+    return errorMap[error] || null;
+  };
+
+  const swapErrorMessage = getSwapErrorMessage(swapError);
+
   const tips = notice
     ? notice
     : kMirrorStates.isMe
@@ -443,12 +476,8 @@ export function MirrorPage() {
             : t("Face swapping... This may take a few seconds, please wait.")
           : selectionTips
             ? selectionTips
-            : swapError
-              ? swapError === "video-not-supported"
-                ? t("Video face swap not supported. Please update server.")
-                : isVideoInput
-                  ? t("Video face swap failed. Try a different video.")
-                  : t("Face swap failed. Try a different image.")
+            : swapErrorMessage
+              ? swapErrorMessage
               : success
                 ? isVideoInput
                   ? t("Face swap successful! Video saved locally.")

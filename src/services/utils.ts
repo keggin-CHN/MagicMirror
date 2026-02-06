@@ -7,7 +7,7 @@ export async function sleep(time: number) {
 }
 
 const kVideoExtensions = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"];
-const kImageExtensions = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"];
+const kImageExtensions = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"];
 
 export function getFileExtension(filePath: string) {
   const index = filePath.lastIndexOf(".");

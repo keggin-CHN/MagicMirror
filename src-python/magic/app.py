@@ -1,4 +1,6 @@
 import json
+import os
+import traceback
 
 from async_tasks import AsyncTask
 from bottle import Bottle, request, response
@@ -6,6 +8,61 @@ from bottle import Bottle, request, response
 from .face import load_models, swap_face, swap_face_regions, swap_face_video
 
 app = Bottle()
+
+ALLOWED_IMAGE_EXTS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".bmp",
+    ".tif",
+    ".tiff",
+}
+
+ALLOWED_VIDEO_EXTS = {
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".mkv",
+    ".webm",
+    ".m4v",
+}
+
+
+def _ext(path: str) -> str:
+    return os.path.splitext(path)[1].lower()
+
+
+def _simplify_task_error(err: object) -> str:
+    """把内部异常/堆栈信息收敛成前端可用的错误码，避免泄漏本地路径等细节。"""
+    msg = (str(err) if err is not None else "").lower()
+    codes = [
+        "missing-params",
+        "file-not-found",
+        "unsupported-image-format",
+        "unsupported-video-format",
+        "image-decode-failed",
+        "no-face-detected",
+        "no-face-in-selected-regions",
+        "swap-failed",
+        "video-open-failed",
+        "video-write-failed",
+        "video-output-missing",
+        "output-write-failed",
+    ]
+    for code in codes:
+        if code in msg:
+            return code
+    return "internal"
+
+
+def _validate_file(path: str, allowed_exts: set[str], *, missing_code: str):
+    if not path:
+        raise RuntimeError("missing-params")
+    if not os.path.exists(path):
+        raise FileNotFoundError("file-not-found")
+    if _ext(path) not in allowed_exts:
+        raise RuntimeError(missing_code)
 
 # https://github.com/bottlepy/bottle/issues/881#issuecomment-244024649
 app.plugins[0].json_dumps = lambda *args, **kwargs: json.dumps(
@@ -46,26 +103,54 @@ def create_task():
     # 处理 OPTIONS 预检请求
     if request.method == "OPTIONS":
         return {}
-    
+
     try:
-        task_id = request.json["id"]
-        input_image = request.json["inputImage"]
-        target_face = request.json["targetFace"]
-        regions = request.json.get("regions")
-        assert all([task_id, input_image, target_face])
+        body = request.json or {}
+        task_id = body.get("id")
+        input_image = body.get("inputImage")
+        target_face = body.get("targetFace")
+        regions = body.get("regions")
+
+        if not all([task_id, input_image, target_face]):
+            response.status = 400
+            return {"error": "missing-params"}
+
+        try:
+            _validate_file(
+                input_image,
+                ALLOWED_IMAGE_EXTS,
+                missing_code="unsupported-image-format",
+            )
+            _validate_file(
+                target_face,
+                ALLOWED_IMAGE_EXTS,
+                missing_code="unsupported-image-format",
+            )
+        except (RuntimeError, FileNotFoundError) as e:
+            response.status = 400
+            return {"error": _simplify_task_error(e)}
+
         if regions:
-            res, _ = AsyncTask.run(
+            res, err = AsyncTask.run(
                 lambda: swap_face_regions(input_image, target_face, regions),
                 task_id=task_id,
             )
         else:
-            res, _ = AsyncTask.run(
-                lambda: swap_face(input_image, target_face), task_id=task_id
+            res, err = AsyncTask.run(
+                lambda: swap_face(input_image, target_face),
+                task_id=task_id,
             )
-        return {"result": res}
-    except BaseException:
-        response.status = 400
-        return {"error": "Something went wrong!"}
+
+        if res:
+            return {"result": res}
+
+        response.status = 500
+        return {"error": _simplify_task_error(err)}
+
+    except Exception as e:
+        print("[ERROR] create_task failed:", str(e), "\n", traceback.format_exc())
+        response.status = 500
+        return {"error": _simplify_task_error(e)}
 
 
 @app.route("/task/video", method=["POST", "OPTIONS"])
@@ -73,37 +158,53 @@ def create_video_task():
     # 处理 OPTIONS 预检请求
     if request.method == "OPTIONS":
         return {}
-    
+
     try:
-        task_id = request.json["id"]
-        input_video = request.json["inputVideo"]
-        target_face = request.json["targetFace"]
-        
-        print(f"[API] 收到视频换脸请求:")
+        body = request.json or {}
+        task_id = body.get("id")
+        input_video = body.get("inputVideo")
+        target_face = body.get("targetFace")
+
+        print("[API] 收到视频换脸请求:")
         print(f"  - task_id: {task_id}")
         print(f"  - input_video: {input_video}")
         print(f"  - target_face: {target_face}")
-        
-        assert all([task_id, input_video, target_face]), "缺少必要参数"
-        
-        res, _ = AsyncTask.run(
-            lambda: swap_face_video(input_video, target_face), task_id=task_id
+
+        if not all([task_id, input_video, target_face]):
+            response.status = 400
+            return {"error": "missing-params"}
+
+        try:
+            _validate_file(
+                input_video,
+                ALLOWED_VIDEO_EXTS,
+                missing_code="unsupported-video-format",
+            )
+            _validate_file(
+                target_face,
+                ALLOWED_IMAGE_EXTS,
+                missing_code="unsupported-image-format",
+            )
+        except (RuntimeError, FileNotFoundError) as e:
+            response.status = 400
+            return {"error": _simplify_task_error(e)}
+
+        res, err = AsyncTask.run(
+            lambda: swap_face_video(input_video, target_face),
+            task_id=task_id,
         )
-        
+
         if res:
             print(f"[API] 视频换脸任务完成: {res}")
             return {"result": res}
-        else:
-            print(f"[API] 视频换脸任务失败")
-            response.status = 500
-            return {"error": "视频换脸处理失败，请查看服务端日志"}
-            
+
+        response.status = 500
+        return {"error": _simplify_task_error(err)}
+
     except Exception as e:
-        import traceback
-        error_msg = f"视频换脸API错误: {str(e)}\n{traceback.format_exc()}"
-        print(f"[ERROR] {error_msg}")
-        response.status = 400
-        return {"error": error_msg}
+        print("[ERROR] create_video_task failed:", str(e), "\n", traceback.format_exc())
+        response.status = 500
+        return {"error": _simplify_task_error(e)}
 
 
 @app.delete("/task/<task_id>")

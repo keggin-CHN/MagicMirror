@@ -138,10 +138,25 @@ class _Server {
       if (!res.ok) {
         const errorText = await res.text();
         console.error(`[Server] 图片换脸请求失败 (${res.status}):`, errorText);
+        try {
+          const data = JSON.parse(errorText);
+          if (data?.error) {
+            return { result: null, error: data.error };
+          }
+        } catch {
+          // ignore
+        }
         return { result: null, error: `http-${res.status}` };
       }
 
-      const data = await res.json();
+      let data: any;
+      try {
+        data = await res.json();
+      } catch (error) {
+        console.error("[Server] 图片换脸响应解析失败:", error);
+        return { result: null, error: "invalid-json" };
+      }
+
       if (data.error) {
         console.error("[Server] 服务端返回错误:", data.error);
         return { result: null, error: data.error };
@@ -174,10 +189,25 @@ class _Server {
       if (!res.ok) {
         const errorText = await res.text();
         console.error(`[Server] 视频换脸请求失败 (${res.status}):`, errorText);
+        try {
+          const data = JSON.parse(errorText);
+          if (data?.error) {
+            return { result: null, error: data.error };
+          }
+        } catch {
+          // ignore
+        }
         return { result: null, error: `http-${res.status}` };
       }
 
-      const data = await res.json();
+      let data: any;
+      try {
+        data = await res.json();
+      } catch (error) {
+        console.error("[Server] 视频换脸响应解析失败:", error);
+        return { result: null, error: "invalid-json" };
+      }
+
       console.log("[Server] 视频换脸响应:", data);
 
       if (data.error) {
