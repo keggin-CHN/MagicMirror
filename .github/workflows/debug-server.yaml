@@ -6,7 +6,7 @@ jobs:
   models:
     name: Download Model Files
     permissions:
-      contents: write
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +35,7 @@ jobs:
     name: Windows
     needs: models
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -63,7 +63,7 @@ jobs:
         run: |
           cd src-python
           pip install -r requirements.txt
-          pip install -e .
+          pip install -e . --no-deps
           cd ${{ github.workspace }}
       - name: Build Server
         shell: pwsh

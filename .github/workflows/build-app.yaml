@@ -1,13 +1,38 @@
 name: Build APP
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "scripts/**"
+      - "index.html"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "vite.config.ts"
+      - "tsconfig.json"
+      - "tsconfig.node.json"
+      - "uno.config.ts"
+      - ".github/workflows/build-app.yaml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "scripts/**"
+      - "index.html"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "vite.config.ts"
+      - "tsconfig.json"
+      - "tsconfig.node.json"
+      - "uno.config.ts"
+      - ".github/workflows/build-app.yaml"
 
 jobs:
-
   build-for-windows:
     name: Windows
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +63,7 @@ jobs:
       - name: Setup Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: "./src-tauri -> target"
       - name: Build APP
         shell: pwsh
         run: |
@@ -55,8 +80,11 @@ jobs:
 
   release:
     name: Release
+    if: github.event_name == 'workflow_dispatch'
     needs: [build-for-windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4

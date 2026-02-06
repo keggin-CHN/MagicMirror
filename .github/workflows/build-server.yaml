@@ -1,12 +1,20 @@
 name: Build Server
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "src-python/**"
+      - ".github/workflows/build-server.yaml"
+  pull_request:
+    paths:
+      - "src-python/**"
+      - ".github/workflows/build-server.yaml"
 
 jobs:
   models:
     name: Download Model Files
     permissions:
-      contents: write
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +43,7 @@ jobs:
     name: Windows
     needs: models
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -63,7 +71,7 @@ jobs:
         run: |
           cd src-python
           pip install -r requirements.txt
-          pip install -e .
+          pip install -e . --no-deps
           cd ${{ github.workspace }}
       - name: Build Server
         shell: pwsh
@@ -92,8 +100,11 @@ jobs:
 
   release:
     name: Release
+    if: github.event_name == 'workflow_dispatch'
     needs: [models, build-for-windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
