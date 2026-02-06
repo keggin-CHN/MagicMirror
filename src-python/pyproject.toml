@@ -10,8 +10,9 @@ python = "^3.10"
 tinyface = "^1.0.1"
 bottle = "^0.13.2"
 async-tasks-python = "^1.0.0"
-opencv-python = "^4.8.0"
-numpy = "^1.24.0"
+# opencv-python 4.12+ requires numpy>=2 on Python>=3.9, but this project currently targets numpy<2
+opencv-python = ">=4.8.0,<4.12"
+numpy = ">=1.24.0,<2"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.10.0"
