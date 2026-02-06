@@ -70,6 +70,10 @@ jobs:
         run: |
           python -m nuitka --standalone --assume-yes-for-downloads `
             --mingw64 --windows-console-mode=force `
+            --include-package=onnx `
+            --include-package=google.protobuf `
+            --include-package=onnxruntime `
+            --include-package-data=onnx `
             --include-data-files="src-python/models/*.onnx=models/" `
             --output-dir=out src-python/server.py
           cd out/server.dist
