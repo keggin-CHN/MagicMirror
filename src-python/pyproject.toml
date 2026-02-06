@@ -9,7 +9,7 @@ authors = ["Del Wang <hello@xbox.work>"]
 python = "^3.10"
 tinyface = "^1.0.1"
 bottle = "^0.13.2"
-async-tasks = "^1.0.0"
+async-tasks-python = "^1.0.0"
 opencv-python = "^4.8.0"
 numpy = "^1.24.0"
 
