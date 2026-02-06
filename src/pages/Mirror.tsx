@@ -539,7 +539,7 @@ export function MirrorPage() {
       : kMirrorStates.result?.type || kMirrorStates.input?.type || "image";
 
   return (
-    <div className="w-100vw h-100vh p-40px">
+    <div data-tauri-drag-region className="w-100vw h-100vh p-40px">
       <div ref={ref} className="relative w-full h-full">
         <div className="absolute top-[-40px] w-full flex-c-c c-white z-10">
           <p className="bg-black p-[4px_8px]">{tips}</p>
