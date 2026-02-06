@@ -122,9 +122,12 @@ export function MirrorPage() {
 
   const toImageRegions = useCallback(() => {
     if (!previewRef.current || !inputSize) {
+      console.log("[DEBUG] toImageRegions: previewRef 或 inputSize 为空", { previewRef: previewRef.current, inputSize });
       return [];
     }
     const rect = previewRef.current.getBoundingClientRect();
+
+    // object-fit: cover 的缩放计算
     const scale = Math.max(
       rect.width / inputSize.width,
       rect.height / inputSize.height
@@ -134,8 +137,17 @@ export function MirrorPage() {
     const offsetX = (rect.width - displayWidth) / 2;
     const offsetY = (rect.height - displayHeight) / 2;
 
-    return regions
-      .map((region: Region) => {
+    console.log("[DEBUG] toImageRegions 转换参数:", {
+      containerRect: { width: rect.width, height: rect.height },
+      inputSize,
+      scale,
+      displaySize: { width: displayWidth, height: displayHeight },
+      offset: { x: offsetX, y: offsetY },
+      screenRegions: regions,
+    });
+
+    const imageRegions = regions
+      .map((region: Region, idx: number) => {
         const x = Math.round((region.x - offsetX) / scale);
         const y = Math.round((region.y - offsetY) / scale);
         const width = Math.round(region.width / scale);
@@ -144,6 +156,13 @@ export function MirrorPage() {
         const clampedY = clamp(y, 0, inputSize.height - 1);
         const clampedWidth = clamp(width, 1, inputSize.width - clampedX);
         const clampedHeight = clamp(height, 1, inputSize.height - clampedY);
+
+        console.log(`[DEBUG] region[${idx}] 转换:`, {
+          screen: region,
+          raw: { x, y, width, height },
+          clamped: { x: clampedX, y: clampedY, width: clampedWidth, height: clampedHeight },
+        });
+
         return {
           x: clampedX,
           y: clampedY,
@@ -152,6 +171,9 @@ export function MirrorPage() {
         };
       })
       .filter((region: Region) => region.width > 1 && region.height > 1);
+
+    console.log("[DEBUG] toImageRegions 最终结果:", imageRegions);
+    return imageRegions;
   }, [regions, inputSize]);
 
   const handlePointerDown = useCallback(
@@ -342,6 +364,12 @@ export function MirrorPage() {
       return;
     }
     const imageRegions = toImageRegions();
+    console.log("[DEBUG] handleStartSwap - imageRegions:", imageRegions);
+    console.log("[DEBUG] handleStartSwap - 准备发送请求:", {
+      inputPath: kMirrorStates.input.path,
+      mePath: kMirrorStates.me.path,
+      regions: imageRegions,
+    });
     if (!imageRegions.length) {
       setNotice(t("Please select at least one area."));
       return;
