@@ -162,6 +162,7 @@ export function MirrorPage() {
       const rect = previewRef.current.getBoundingClientRect();
       const startX = clamp(event.clientX - rect.left, 0, rect.width);
       const startY = clamp(event.clientY - rect.top, 0, rect.height);
+      previewRef.current.setPointerCapture(event.pointerId);
       resizeRef.current = null;
       setSelectedRegionIndex(null);
       selectingRef.current = true;
@@ -244,22 +245,32 @@ export function MirrorPage() {
     [clamp]
   );
 
-  const finishSelection = useCallback(() => {
-    if (resizeRef.current) {
-      resizeRef.current = null;
-      return;
-    }
-    if (!selectingRef.current) {
-      return;
-    }
-    selectingRef.current = false;
-    if (draftRegion && draftRegion.width > 4 && draftRegion.height > 4) {
-      setRegions((prev: Region[]) => [...prev, draftRegion]);
-      setSelectedRegionIndex(regions.length);
-    }
-    setDraftRegion(null);
-    startPointRef.current = null;
-  }, [draftRegion, regions.length]);
+  const finishSelection = useCallback(
+    (event?: PointerEvent<HTMLDivElement>) => {
+      if (event && previewRef.current) {
+        try {
+          previewRef.current.releasePointerCapture(event.pointerId);
+        } catch {
+          // ignore: might not have pointer capture
+        }
+      }
+      if (resizeRef.current) {
+        resizeRef.current = null;
+        return;
+      }
+      if (!selectingRef.current) {
+        return;
+      }
+      selectingRef.current = false;
+      if (draftRegion && draftRegion.width > 4 && draftRegion.height > 4) {
+        setRegions((prev: Region[]) => [...prev, draftRegion]);
+        setSelectedRegionIndex(regions.length);
+      }
+      setDraftRegion(null);
+      startPointRef.current = null;
+    },
+    [draftRegion, regions.length]
+  );
 
   const handleSelectRegion = useCallback(
     (index: number) => (event: PointerEvent<HTMLDivElement>) => {
@@ -279,6 +290,7 @@ export function MirrorPage() {
         const rect = previewRef.current.getBoundingClientRect();
         const startX = clamp(event.clientX - rect.left, 0, rect.width);
         const startY = clamp(event.clientY - rect.top, 0, rect.height);
+        previewRef.current.setPointerCapture(event.pointerId);
         resizeRef.current = {
           index,
           handle,
@@ -361,7 +373,7 @@ export function MirrorPage() {
     rebuild.current();
   }, [isImageInput, regions, swapFace, t, toImageRegions]);
 
-  const { ref } = useDragDrop(async (paths) => {
+  const { ref, isOverTarget } = useDragDrop(async (paths) => {
     const path = paths[0];
     const src = convertFileSrc(path);
     const isVideo = isVideoFile(path);
@@ -500,16 +512,16 @@ export function MirrorPage() {
 
   return (
     <div className="w-100vw h-100vh p-40px">
-      <div ref={ref} data-tauri-drag-region className="relative w-full h-full">
+      <div ref={ref} className="relative w-full h-full">
         <div className="absolute top-[-40px] w-full flex-c-c c-white z-10">
           <p className="bg-black p-[4px_8px]">{tips}</p>
         </div>
         <div className="absolute top-50px right-50px z-10">
           <div className="relative dropdown">
             <img
-              data-tauri-drag-region
               src={iconMenu}
               className="h-70px cursor-pointer pb-10px"
+              draggable={false}
             />
             <div>
               <div className="dropdown-menu flex-col-c-c bg-black color-white">
@@ -537,9 +549,9 @@ export function MirrorPage() {
           </div>
         </div>
         <img
-          data-tauri-drag-region
           src={kMirrorStates.isMe ? mirrorMe : mirrorInput}
-          className="absolute w-full h-full object-cover z-3"
+          className="mirror-frame absolute w-full h-full object-cover z-3"
+          draggable={false}
           style={{
             maskImage:
               "radial-gradient(circle, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 1) 40%)",
@@ -553,122 +565,123 @@ export function MirrorPage() {
             padding: kMirrorStates.isMe ? "120px" : "100px",
           }}
         >
-          <div className="mirror-preview">
-            <div
-              ref={previewRef}
-              className={`preview-container ${showSelection ? "selection-active" : ""}`}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={finishSelection}
-              onPointerLeave={finishSelection}
-            >
-              {previewType === "video" ? (
-                <video
-                  data-tauri-drag-region
-                  src={previewSrc}
-                  className="rd-50% w-full h-full object-cover bg-black"
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
-                />
-              ) : (
-                <img
-                  data-tauri-drag-region
-                  src={previewSrc}
-                  className="rd-50% w-full h-full object-cover bg-black"
-                />
-              )}
-              {showSelection && (
-                <div className="selection-layer">
-                  {regions.map((region: Region, index: number) => (
-                    <div
-                      key={`region-${index}`}
-                      className={`selection-rect ${selectedRegionIndex === index ? "selected" : ""}`}
-                      style={{
-                        left: region.x,
-                        top: region.y,
-                        width: region.width,
-                        height: region.height,
-                      }}
-                      onPointerDown={handleSelectRegion(index)}
-                    >
-                      <span className="selection-index">{index + 1}</span>
-                      {selectedRegionIndex === index && (
-                        <>
-                          <div
-                            className="selection-handle nw"
-                            onPointerDown={handleResizePointerDown(index, "nw")}
-                          />
-                          <div
-                            className="selection-handle ne"
-                            onPointerDown={handleResizePointerDown(index, "ne")}
-                          />
-                          <div
-                            className="selection-handle sw"
-                            onPointerDown={handleResizePointerDown(index, "sw")}
-                          />
-                          <div
-                            className="selection-handle se"
-                            onPointerDown={handleResizePointerDown(index, "se")}
-                          />
-                        </>
-                      )}
-                    </div>
-                  ))}
-                  {draftRegion && (
-                    <div
-                      className="selection-rect draft"
-                      style={{
-                        left: draftRegion.x,
-                        top: draftRegion.y,
-                        width: draftRegion.width,
-                        height: draftRegion.height,
-                      }}
-                    />
-                  )}
-                </div>
-              )}
-              {showToolbar && (
-                <div
-                  className="selection-toolbar"
-                  onPointerDown={(
-                    event: PointerEvent<HTMLDivElement>
-                  ) => event.stopPropagation()}
-                >
-                  <div
-                    className={`selection-btn ${regions.length ? "" : "disabled"}`}
-                    onClick={handleStartSwap}
-                  >
-                    {t("Start Swap")}
+          <div className={`mirror-preview ${isOverTarget ? "drop-over" : ""}`}>
+            <div className="mirror-clip">
+              <div
+                ref={previewRef}
+                className={`preview-container ${showSelection ? "selection-active" : ""}`}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={finishSelection}
+                onPointerCancel={finishSelection}
+              >
+                {previewType === "video" ? (
+                  <video
+                    src={previewSrc}
+                    className="preview-media"
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                  />
+                ) : (
+                  <img
+                    src={previewSrc}
+                    className="preview-media"
+                    draggable={false}
+                  />
+                )}
+                {showSelection && (
+                  <div className="selection-layer">
+                    {regions.map((region: Region, index: number) => (
+                      <div
+                        key={`region-${index}`}
+                        className={`selection-rect ${selectedRegionIndex === index ? "selected" : ""}`}
+                        style={{
+                          left: region.x,
+                          top: region.y,
+                          width: region.width,
+                          height: region.height,
+                        }}
+                        onPointerDown={handleSelectRegion(index)}
+                      >
+                        <span className="selection-index">{index + 1}</span>
+                        {selectedRegionIndex === index && (
+                          <>
+                            <div
+                              className="selection-handle nw"
+                              onPointerDown={handleResizePointerDown(index, "nw")}
+                            />
+                            <div
+                              className="selection-handle ne"
+                              onPointerDown={handleResizePointerDown(index, "ne")}
+                            />
+                            <div
+                              className="selection-handle sw"
+                              onPointerDown={handleResizePointerDown(index, "sw")}
+                            />
+                            <div
+                              className="selection-handle se"
+                              onPointerDown={handleResizePointerDown(index, "se")}
+                            />
+                          </>
+                        )}
+                      </div>
+                    ))}
+                    {draftRegion && (
+                      <div
+                        className="selection-rect draft"
+                        style={{
+                          left: draftRegion.x,
+                          top: draftRegion.y,
+                          width: draftRegion.width,
+                          height: draftRegion.height,
+                        }}
+                      />
+                    )}
                   </div>
-                  <div
-                    className={`selection-btn ${selectedRegionIndex === null ? "disabled" : ""}`}
-                    onClick={handleDeleteSelected}
-                  >
-                    {t("Delete Selected")}
-                  </div>
-                  <div
-                    className={`selection-btn ${regions.length ? "" : "disabled"}`}
-                    onClick={handleClearRegions}
-                  >
-                    {t("Clear Selection")}
-                  </div>
-                </div>
-              )}
-              {!showSelection && isImageInput && kMirrorStates.result && (
-                <div
-                  className="selection-toolbar"
-                  onPointerDown={(
-                    event: PointerEvent<HTMLDivElement>
-                  ) => event.stopPropagation()}
-                >
-                  <div className="selection-btn" onClick={handleEditRegions}>
-                    {t("Edit Selection")}
-                  </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
+            {showToolbar && (
+              <div
+                className="selection-toolbar"
+                onPointerDown={(
+                  event: PointerEvent<HTMLDivElement>
+                ) => event.stopPropagation()}
+              >
+                <div
+                  className={`selection-btn ${regions.length ? "" : "disabled"}`}
+                  onClick={handleStartSwap}
+                >
+                  {t("Start Swap")}
+                </div>
+                <div
+                  className={`selection-btn ${selectedRegionIndex === null ? "disabled" : ""}`}
+                  onClick={handleDeleteSelected}
+                >
+                  {t("Delete Selected")}
+                </div>
+                <div
+                  className={`selection-btn ${regions.length ? "" : "disabled"}`}
+                  onClick={handleClearRegions}
+                >
+                  {t("Clear Selection")}
+                </div>
+              </div>
+            )}
+            {!showSelection && isImageInput && kMirrorStates.result && (
+              <div
+                className="selection-toolbar"
+                onPointerDown={(
+                  event: PointerEvent<HTMLDivElement>
+                ) => event.stopPropagation()}
+              >
+                <div className="selection-btn" onClick={handleEditRegions}>
+                  {t("Edit Selection")}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

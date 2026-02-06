@@ -30,6 +30,31 @@
   position: relative;
   width: 100%;
   height: 100%;
+  /* allow toolbar to render outside the circular preview */
+  overflow: visible;
+}
+
+/* drag & drop hover feedback */
+.mirror-preview.drop-over .mirror-clip {
+  outline: 3px solid rgba(0, 224, 255, 0.9);
+  outline-offset: 6px;
+  box-shadow:
+    0 0 0 6px rgba(0, 224, 255, 0.15),
+    0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+/* decorative frame overlay should not block selection */
+.mirror-frame {
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* circular clipping area */
+.mirror-clip {
+  position: relative;
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
   overflow: hidden;
 }
@@ -39,6 +64,20 @@
   width: 100%;
   height: 100%;
   overflow: hidden;
+
+  /* improve touch / pen selection behavior */
+  touch-action: none;
+  user-select: none;
+}
+
+/* shared style for img/video preview */
+.preview-media {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+  border-radius: 50%;
+  display: block;
 }
 
 .preview-container::before {
@@ -146,29 +185,46 @@
 
 .selection-toolbar {
   position: absolute;
-  bottom: 12px;
+  /* move toolbar outside the circular preview to avoid covering content */
+  bottom: -54px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 5;
+  z-index: 6;
   display: flex;
-  gap: 8px;
-  background: rgba(0, 0, 0, 0.6);
-  padding: 6px 10px;
-  border-radius: 16px;
+  gap: 10px;
+
+  /* higher contrast */
+  background: rgba(0, 0, 0, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 8px 12px;
+  border-radius: 18px;
   pointer-events: auto;
+  backdrop-filter: blur(8px);
 }
 
 .selection-btn {
-  padding: 4px 10px;
-  border-radius: 10px;
+  padding: 6px 12px;
+  border-radius: 12px;
   background: #00e0ff;
-  color: #000;
+  color: #001014;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   user-select: none;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.selection-btn:hover {
+  filter: brightness(1.05);
+}
+
+.selection-btn:active {
+  transform: translateY(1px);
 }
 
 .selection-btn.disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   pointer-events: none;
+  filter: grayscale(0.15);
 }
