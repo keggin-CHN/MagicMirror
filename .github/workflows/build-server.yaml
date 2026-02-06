@@ -81,6 +81,7 @@ jobs:
             --include-package=onnx `
             --include-package=google.protobuf `
             --include-package=onnxruntime `
+            --include-package-data=onnxruntime `
             --include-package=async_tasks `
             --include-package=cv2 `
             --include-package=numpy `
@@ -89,6 +90,35 @@ jobs:
             --include-package-data=onnx `
             --include-data-files="src-python/models/*.onnx=models/" `
             --output-dir=out src-python/server.py
+
+          # Make the build more "portable": bundle MSVC runtime DLLs to avoid requiring vc_redist on user machines.
+          $dist = Join-Path $PWD "out/server.dist"
+          $sys32 = Join-Path $env:WINDIR "System32"
+          $crtDlls = @(
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+            "msvcp140.dll",
+            "msvcp140_1.dll",
+            "msvcp140_2.dll",
+            "msvcp140_atomic_wait.dll",
+            "concrt140.dll",
+            "vcomp140.dll"
+          )
+          foreach ($dll in $crtDlls) {
+            $src = Join-Path $sys32 $dll
+            $dst = Join-Path $dist $dll
+            if ((Test-Path $src) -and !(Test-Path $dst)) {
+              Copy-Item -Force $src $dst
+            }
+          }
+
+          # Fail fast if onnxruntime provider DLLs are missing (this would cause ImportError in onnxruntime.capi._pybind_state).
+          $providers = Get-ChildItem -Path (Join-Path $dist "onnxruntime/capi") -Filter "onnxruntime_providers_*.dll" -ErrorAction SilentlyContinue
+          if (!$providers -or $providers.Count -lt 2) {
+            Write-Host "Found provider DLLs:" ($providers | ForEach-Object Name)
+            throw "onnxruntime provider DLLs missing from dist"
+          }
+
           cd out/server.dist
           Compress-Archive -Path * -DestinationPath "../server_${{ matrix.build }}_${{ matrix.arch }}.zip"
           cd ${{ github.workspace }}

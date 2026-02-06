@@ -2,6 +2,7 @@ python -m nuitka --standalone --assume-yes-for-downloads \
   --include-package=onnx \
   --include-package=google.protobuf \
   --include-package=onnxruntime \
+  --include-package-data=onnxruntime \
   --include-package=async_tasks \
   --include-package=cv2 \
   --include-package=numpy \
