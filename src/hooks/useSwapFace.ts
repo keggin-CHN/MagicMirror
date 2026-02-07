@@ -70,6 +70,7 @@ export function useSwapFace() {
 
       const taskId = (kSwapFaceRefs.id++).toString();
       let polling = true;
+      let finalResult: string | null = null;
 
       const pollProgress = async () => {
         while (polling) {
@@ -78,12 +79,19 @@ export function useSwapFace() {
             setVideoProgress(state.progress ?? 0);
             setVideoEtaSeconds(state.etaSeconds ?? null);
             setVideoStage(state.stage ?? null);
+            if (state.status === "success" && state.result) {
+              finalResult = state.result;
+              polling = false;
+            }
           } else if (state.status === "failed") {
             setVideoEtaSeconds(null);
             setVideoStage(state.stage ?? "failed");
+            setError(state.error ?? "unknown");
+            polling = false;
           } else if (state.status === "cancelled") {
             setVideoEtaSeconds(null);
             setVideoStage(state.stage ?? "cancelled");
+            polling = false;
           }
           if (!polling) {
             break;
@@ -109,20 +117,35 @@ export function useSwapFace() {
         ...task,
       });
 
-      polling = false;
-      await pollPromise;
-
-      kSwapFaceRefs.cancel = undefined;
-      const finalError = result ? null : error ?? "unknown";
-      setError(finalError);
-      setOutput(result);
+      // If the backend returns immediately (queued), we don't have the result yet.
+      // We rely on polling to get the result.
       if (result) {
+        // If backend returned result immediately (old behavior or fast task)
         setVideoProgress(100);
         setVideoEtaSeconds(0);
         setVideoStage("done");
-      } else {
+        setOutput(result);
+      } else if (error) {
+        // Immediate error
+        setError(error);
         setVideoStage("failed");
+        polling = false; // Stop polling
       }
+
+      // Wait for polling to finish (it finishes when status is success/failed/cancelled)
+      await pollPromise;
+
+      kSwapFaceRefs.cancel = undefined;
+
+      if (finalResult) {
+        setVideoProgress(100);
+        setVideoEtaSeconds(0);
+        setVideoStage("done");
+        setOutput(finalResult);
+        setIsSwapping(false);
+        return finalResult;
+      }
+
       setIsSwapping(false);
       return result;
     },

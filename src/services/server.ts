@@ -55,6 +55,7 @@ export interface VideoTaskProgress {
   etaSeconds?: number | null;
   error?: string | null;
   stage?: string | null;
+  result?: string | null;
 }
 
 class _Server {
@@ -389,6 +390,7 @@ class _Server {
           data.stage === null || data.stage === undefined
             ? null
             : String(data.stage),
+        result: data.result ?? null,
       };
     } catch {
       return { status: "idle", progress: 0, etaSeconds: null };
