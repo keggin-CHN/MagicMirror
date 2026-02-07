@@ -116,26 +116,46 @@ jobs:
           $dstCapi = Join-Path $dist "onnxruntime/capi"
           New-Item -ItemType Directory -Force -Path $dstCapi | Out-Null
           $ortBase = python -c "import onnxruntime, pathlib; print(pathlib.Path(onnxruntime.__file__).resolve().parent)"
-          $providerDlls = Get-ChildItem -Path $ortBase -Recurse -Filter "onnxruntime_providers_*.dll" -ErrorAction SilentlyContinue
+          $providerDlls = @(Get-ChildItem -Path $ortBase -Recurse -Filter "onnxruntime_providers_*.dll" -ErrorAction SilentlyContinue)
           foreach ($dll in $providerDlls) {
             Copy-Item -Force $dll.FullName $dstCapi
           }
 
-          # Fail fast if onnxruntime provider DLLs are missing (this would cause ImportError in onnxruntime.capi._pybind_state).
-          $providers = Get-ChildItem -Path $dstCapi -Filter "onnxruntime_providers_*.dll" -ErrorAction SilentlyContinue
-          if (!$providers -or $providers.Count -lt 2) {
-            Write-Host "Found provider DLLs:" ($providers | ForEach-Object Name)
-            throw "onnxruntime provider DLLs missing from dist"
+          # Fail fast only when expected provider DLLs were not copied. Newer CPU wheels may legitimately contain only shared.dll.
+          $srcProviderNames = @($providerDlls | Select-Object -ExpandProperty Name -Unique)
+          $providers = @(Get-ChildItem -Path $dstCapi -Filter "onnxruntime_providers_*.dll" -ErrorAction SilentlyContinue)
+          $dstProviderNames = @($providers | Select-Object -ExpandProperty Name -Unique)
+          $missingProviders = @($srcProviderNames | Where-Object { $_ -notin $dstProviderNames })
+
+          $sharedProvider = Join-Path $dstCapi "onnxruntime_providers_shared.dll"
+          if (!(Test-Path $sharedProvider)) {
+            Write-Host "Source provider DLLs:" ($srcProviderNames -join ", ")
+            Write-Host "Dist provider DLLs:" ($dstProviderNames -join ", ")
+            throw "onnxruntime_providers_shared.dll missing from dist"
           }
+
+          if ($srcProviderNames.Count -gt 0 -and $missingProviders.Count -gt 0) {
+            Write-Host "Missing provider DLLs:" ($missingProviders -join ", ")
+            Write-Host "Dist provider DLLs:" ($dstProviderNames -join ", ")
+            throw "onnxruntime provider DLL copy incomplete"
+          }
+
+          Write-Host "Bundled provider DLLs:" ($dstProviderNames -join ", ")
 
           cd out/server.dist
           Compress-Archive -Path * -DestinationPath "../server_${{ matrix.build }}_${{ matrix.arch }}.zip"
           cd ${{ github.workspace }}
+
+          $zipPath = Join-Path $PWD "out/server_${{ matrix.build }}_${{ matrix.arch }}.zip"
+          if (!(Test-Path $zipPath)) {
+            throw "server zip not created: $zipPath"
+          }
       - name: Upload Server
         uses: actions/upload-artifact@v4
         with:
           name: server_${{ matrix.build }}_${{ matrix.arch }}
           path: out/*.zip
+          if-no-files-found: error
 
   release:
     name: Release
@@ -147,7 +167,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Downoad Artifacts
+      - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: server_*
