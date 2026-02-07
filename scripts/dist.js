@@ -31,7 +31,18 @@ const copyFile = async (from, to) => {
 async function main() {
   const args = process.argv.slice(2);
   const [target, appName] = args;
-  const bundleDir = path.resolve(`src-tauri/target/${target}/release/bundle`);
+  const bundleDirWithTarget = path.resolve(
+    `src-tauri/target/${target}/release/bundle`
+  );
+  const bundleDirWithoutTarget = path.resolve(`src-tauri/target/release/bundle`);
+
+  let bundleDir = bundleDirWithTarget;
+  if (!existsSync(bundleDir) && existsSync(bundleDirWithoutTarget)) {
+    bundleDir = bundleDirWithoutTarget;
+  }
+
+  console.log(`Using bundle directory: ${bundleDir}`);
+
   let outputs = {};
   switch (process.platform) {
     case "darwin":
@@ -45,12 +56,16 @@ async function main() {
       };
   }
   for (const dir in outputs) {
-    const files = await getFiles(path.join(bundleDir, dir));
+    const targetDir = path.join(bundleDir, dir);
+    const files = await getFiles(targetDir);
+    if (files.length === 0) {
+      console.warn(`No files found in ${targetDir}`);
+    }
     for (const filename of files) {
       const suffix = outputs[dir].find((e) => filename.endsWith(e));
       if (suffix) {
         await copyFile(
-          path.join(bundleDir, dir, filename),
+          path.join(targetDir, filename),
           path.join("dist", appName + suffix)
         );
         console.log(`✅ ${appName + suffix}`);
