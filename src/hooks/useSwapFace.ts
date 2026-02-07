@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from "react";
 import { useXState } from "xsta";
-import { Server, type Region, type TaskResult } from "../services/server";
+import { Server, type Task, type TaskResult, type VideoTask } from "../services/server";
 
 const kSwapFaceRefs: {
   id: number;
@@ -43,15 +43,13 @@ export function useSwapFace() {
   );
 
   const swapFace = useCallback(
-    async (inputImage: string, targetFace: string, regions?: Region[]) => {
+    async (task: Omit<Task, "id">) => {
       setVideoProgress(0);
       setVideoEtaSeconds(null);
       return runTask((taskId: string) =>
         Server.createTask({
           id: taskId,
-          inputImage,
-          targetFace,
-          regions,
+          ...task,
         })
       );
     },
@@ -59,7 +57,7 @@ export function useSwapFace() {
   );
 
   const swapVideo = useCallback(
-    async (inputVideo: string, targetFace: string) => {
+    async (task: Omit<VideoTask, "id">) => {
       await kSwapFaceRefs.cancel?.();
 
       setIsSwapping(true);
@@ -99,8 +97,7 @@ export function useSwapFace() {
 
       const { result, error } = await Server.createVideoTask({
         id: taskId,
-        inputVideo,
-        targetFace,
+        ...task,
       });
 
       polling = false;

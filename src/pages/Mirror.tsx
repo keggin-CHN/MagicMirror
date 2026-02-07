@@ -1,12 +1,19 @@
 import { ProgressBar } from "@/components/ProgressBar";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useSwapFace } from "@/hooks/useSwapFace";
-import { type Region } from "@/services/server";
+import { Server, type FaceSource, type Region } from "@/services/server";
 import { getFileExtension, isImageFile, isVideoFile } from "@/services/utils";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { exit } from "@tauri-apps/plugin-process";
 import { open } from "@tauri-apps/plugin-shell";
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type PointerEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import "@/styles/mirror.css";
@@ -21,7 +28,14 @@ interface Asset {
   type?: "image" | "video";
 }
 
+interface FaceAsset extends FaceSource {
+  src: string;
+  locked?: boolean;
+}
+
 type ResizeHandle = "nw" | "ne" | "sw" | "se";
+
+const kDefaultFaceSourceId = "default-me";
 
 const kMirrorStates: {
   isMe: boolean;
@@ -74,6 +88,14 @@ export function MirrorPage() {
     startY: number;
     origin: Region;
   } | null>(null);
+  const [isMultiFaceMode, setIsMultiFaceMode] = useState(false);
+  const [faceSources, setFaceSources] = useState<FaceAsset[]>([]);
+  const faceSourceInputRef = useRef<HTMLInputElement | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const autoDetectedImagePathRef = useRef<string | null>(null);
+  const [videoDurationMs, setVideoDurationMs] = useState(0);
+  const [videoKeyFrameMs, setVideoKeyFrameMs] = useState(0);
+  const [isDetectingFaces, setIsDetectingFaces] = useState(false);
 
   useEffect(() => {
     setTimeout(() => {
@@ -90,30 +112,43 @@ export function MirrorPage() {
 
   useEffect(() => {
     const input = kMirrorStates.input;
-    if (!input || input.type !== "image") {
+    if (!input) {
       setInputSize(null);
       setRegions([]);
       setDraftRegion(null);
       setIsEditingRegions(false);
       setSelectedRegionIndex(null);
+      setVideoDurationMs(0);
+      setVideoKeyFrameMs(0);
       selectingRef.current = false;
       startPointRef.current = null;
       resizeRef.current = null;
       moveRef.current = null;
       inputPathRef.current = null;
+      autoDetectedImagePathRef.current = null;
       return;
     }
-    if (inputPathRef.current !== input.path) {
-      inputPathRef.current = input.path;
-      setRegions([]);
-      setDraftRegion(null);
-      setIsEditingRegions(true);
-      setSelectedRegionIndex(null);
-      setInputSize(null);
-      selectingRef.current = false;
-      startPointRef.current = null;
-      resizeRef.current = null;
-      moveRef.current = null;
+
+    const inputIdentity = `${input.type || "image"}:${input.path}`;
+    if (inputPathRef.current === inputIdentity) {
+      return;
+    }
+
+    inputPathRef.current = inputIdentity;
+    autoDetectedImagePathRef.current = null;
+    setRegions([]);
+    setDraftRegion(null);
+    setIsEditingRegions(true);
+    setSelectedRegionIndex(null);
+    setInputSize(null);
+    setVideoDurationMs(0);
+    setVideoKeyFrameMs(0);
+    selectingRef.current = false;
+    startPointRef.current = null;
+    resizeRef.current = null;
+    moveRef.current = null;
+
+    if (input.type === "image") {
       const img = new Image();
       img.onload = () => {
         setInputSize({ width: img.naturalWidth, height: img.naturalHeight });
@@ -122,24 +157,84 @@ export function MirrorPage() {
     }
   }, [kMirrorStates.input?.path, kMirrorStates.input?.type]);
 
+  useEffect(() => {
+    const me = kMirrorStates.me;
+    if (!isMultiFaceMode || !me) {
+      return;
+    }
+    setFaceSources((prev: FaceAsset[]) => {
+      const others = prev.filter((item) => item.id !== kDefaultFaceSourceId);
+      return [
+        {
+          id: kDefaultFaceSourceId,
+          path: me.path,
+          src: me.src,
+          locked: true,
+        },
+        ...others,
+      ];
+    });
+  }, [isMultiFaceMode, flag]);
+
   const clamp = (value: number, min: number, max: number) =>
     Math.max(min, Math.min(value, max));
 
   const isImageInput = kMirrorStates.input?.type === "image";
+  const isVideoInput = kMirrorStates.input?.type === "video";
   const canSelect =
     !kMirrorStates.isMe &&
-    isImageInput &&
+    (isImageInput || isVideoInput) &&
     isEditingRegions &&
     !isSwapping &&
     !!inputSize;
   const showSelection =
-    isImageInput && isEditingRegions && !kMirrorStates.isMe && !!inputSize;
+    (isImageInput || isVideoInput) &&
+    isEditingRegions &&
+    !kMirrorStates.isMe &&
+    !!inputSize;
   const showToolbar = showSelection && !isSwapping;
+  const canStartSwap =
+    isVideoInput && !isMultiFaceMode ? true : regions.length > 0;
   const selectionObjectFit: "contain" | "cover" = showSelection
     ? "contain"
     : "cover";
 
-  const toImageRegions = useCallback(() => {
+  const mapMediaRegionsToScreen = useCallback(
+    (mediaRegions: Region[], mediaWidth: number, mediaHeight: number): Region[] => {
+      if (!previewRef.current || mediaWidth <= 0 || mediaHeight <= 0) {
+        return [];
+      }
+
+      const rect = previewRef.current.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return [];
+      }
+
+      const scale = Math.min(rect.width / mediaWidth, rect.height / mediaHeight);
+      const displayWidth = mediaWidth * scale;
+      const displayHeight = mediaHeight * scale;
+      const offsetX = (rect.width - displayWidth) / 2;
+      const offsetY = (rect.height - displayHeight) / 2;
+
+      return mediaRegions
+        .map((region: Region) => {
+          const x = clamp(region.x * scale + offsetX, 0, rect.width - 1);
+          const y = clamp(region.y * scale + offsetY, 0, rect.height - 1);
+          const width = clamp(region.width * scale, 1, rect.width - x);
+          const height = clamp(region.height * scale, 1, rect.height - y);
+          return {
+            x: Math.round(x),
+            y: Math.round(y),
+            width: Math.round(width),
+            height: Math.round(height),
+          };
+        })
+        .filter((region: Region) => region.width > 1 && region.height > 1);
+    },
+    [clamp]
+  );
+
+  const toImageRegions = useCallback((): Region[] => {
     if (!previewRef.current || !inputSize) {
       console.log("[DEBUG] toImageRegions: previewRef 或 inputSize 为空", { previewRef: previewRef.current, inputSize });
       return [];
@@ -187,6 +282,7 @@ export function MirrorPage() {
           y: clampedY,
           width: clampedWidth,
           height: clampedHeight,
+          faceSourceId: region.faceSourceId,
         };
       })
       .filter((region: Region) => region.width > 1 && region.height > 1);
@@ -194,6 +290,75 @@ export function MirrorPage() {
     console.log("[DEBUG] toImageRegions 最终结果:", imageRegions);
     return imageRegions;
   }, [regions, inputSize, selectionObjectFit]);
+
+  useEffect(() => {
+    if (!showSelection || !isImageInput || !inputSize) {
+      return;
+    }
+    const input = kMirrorStates.input;
+    if (!input || input.type !== "image") {
+      return;
+    }
+    if (autoDetectedImagePathRef.current === input.path) {
+      return;
+    }
+
+    autoDetectedImagePathRef.current = input.path;
+    let cancelled = false;
+
+    (async () => {
+      setIsDetectingFaces(true);
+      const detected = await Server.detectImageFaces(input.path);
+      if (cancelled) {
+        return;
+      }
+      setIsDetectingFaces(false);
+
+      if (detected.error) {
+        return;
+      }
+
+      const screenRegions = mapMediaRegionsToScreen(
+        detected.regions || [],
+        inputSize.width,
+        inputSize.height
+      ).map((region: Region) => ({
+        x: region.x,
+        y: region.y,
+        width: region.width,
+        height: region.height,
+      }));
+
+      setRegions(screenRegions);
+      setSelectedRegionIndex(screenRegions.length > 0 ? 0 : null);
+      if (!screenRegions.length) {
+        setNotice(t("No face detected in selected areas."));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showSelection, isImageInput, inputSize, mapMediaRegionsToScreen, t]);
+
+  useEffect(() => {
+    if (!isVideoInput || !showSelection) {
+      return;
+    }
+    const video = previewVideoRef.current;
+    if (!video) {
+      return;
+    }
+    const targetTime = Math.max(0, videoKeyFrameMs / 1000);
+    if (Math.abs(video.currentTime - targetTime) > 0.05) {
+      try {
+        video.currentTime = targetTime;
+      } catch {
+        // ignore
+      }
+    }
+    video.pause();
+  }, [isVideoInput, showSelection, videoKeyFrameMs, kMirrorStates.input?.path]);
 
   const handlePointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -330,14 +495,14 @@ export function MirrorPage() {
       }
       selectingRef.current = false;
       if (draftRegion && draftRegion.width > 4 && draftRegion.height > 4) {
-        setRegions((prev: Region[]) => [...prev, draftRegion]);
+        setRegions((prev: Region[]) => [...prev, { ...draftRegion }]);
         setSelectedRegionIndex(regions.length);
       }
       setDraftRegion(null);
       startPointRef.current = null;
       moveRef.current = null;
     },
-    [draftRegion, regions.length]
+    [draftRegion, regions.length, isMultiFaceMode, faceSources]
   );
 
   const handleSelectRegion = useCallback(
@@ -420,40 +585,310 @@ export function MirrorPage() {
     setIsEditingRegions(true);
   }, []);
 
-  const handleStartSwap = useCallback(async () => {
-    if (!kMirrorStates.me || !kMirrorStates.input || !isImageInput) {
+  const handleToggleMultiFaceMode = useCallback(() => {
+    setIsMultiFaceMode((prev: boolean) => {
+      const next = !prev;
+      if (!next) {
+        setFaceSources([]);
+        setRegions((prevRegions: Region[]) =>
+          prevRegions.map((region: Region) => ({
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+          }))
+        );
+      } else {
+        const me = kMirrorStates.me;
+        if (!me) {
+          return next;
+        }
+        setFaceSources((prevSources: FaceAsset[]) => {
+          const others = prevSources.filter(
+            (item) => item.id !== kDefaultFaceSourceId
+          );
+          return [
+            {
+              id: kDefaultFaceSourceId,
+              path: me.path,
+              src: me.src,
+              locked: true,
+            },
+            ...others,
+          ];
+        });
+      }
+      return next;
+    });
+    setNotice(null);
+  }, []);
+
+  const addFaceSourcesFromPaths = useCallback((paths: string[]) => {
+    if (!paths.length) {
       return;
     }
+    const additions = paths
+      .filter((path: string) => {
+        const ext = getFileExtension(path);
+        return isImageFile(path) && ext !== ".heic" && ext !== ".heif";
+      })
+      .map((path: string, idx: number) => ({
+        id: `face-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}`,
+        path,
+        src: convertFileSrc(path),
+      }));
+
+    if (!additions.length) {
+      return;
+    }
+
+    setFaceSources((prev: FaceAsset[]) => {
+      const existed = new Set(prev.map((item) => item.path));
+      const deduped = additions.filter((item) => !existed.has(item.path));
+      if (!deduped.length) {
+        return prev;
+      }
+      return [...prev, ...deduped];
+    });
+    setNotice(null);
+  }, []);
+
+  const handleOpenFaceSourcePicker = useCallback(() => {
+    faceSourceInputRef.current?.click();
+  }, []);
+
+  const handleFaceSourceInputChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? []);
+      const paths = files
+        .map((file) => (file as File & { path?: string }).path)
+        .filter((path): path is string => !!path);
+
+      addFaceSourcesFromPaths(paths);
+      event.currentTarget.value = "";
+    },
+    [addFaceSourcesFromPaths]
+  );
+
+  const handleAssignSelectedRegionFaceSource = useCallback(
+    (faceSourceId: string) => {
+      if (selectedRegionIndex === null) {
+        return;
+      }
+      setRegions((prev: Region[]) =>
+        prev.map((region: Region, idx: number) =>
+          idx === selectedRegionIndex ? { ...region, faceSourceId } : region
+        )
+      );
+    },
+    [selectedRegionIndex]
+  );
+
+  const handleRemoveFaceSource = useCallback(
+    (faceSourceId: string) => {
+      if (faceSourceId === kDefaultFaceSourceId) {
+        return;
+      }
+      setFaceSources((prev: FaceAsset[]) =>
+        prev.filter((source) => source.id !== faceSourceId || source.locked)
+      );
+      setRegions((prev: Region[]) =>
+        prev.map((region: Region) =>
+          region.faceSourceId === faceSourceId
+            ? { ...region, faceSourceId: undefined }
+            : region
+        )
+      );
+    },
+    [faceSources]
+  );
+
+  const handleVideoTimelineChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const next = Number(event.target.value);
+      setVideoKeyFrameMs(
+        Number.isFinite(next) ? Math.max(0, Math.round(next)) : 0
+      );
+    },
+    []
+  );
+
+  const handleDetectVideoFacesAtKeyFrame = useCallback(async () => {
+    const input = kMirrorStates.input;
+    if (!input || input.type !== "video" || !inputSize) {
+      return;
+    }
+
+    setNotice(null);
+    setIsDetectingFaces(true);
+    const detected = await Server.detectVideoFaces(
+      input.path,
+      Math.max(0, Math.round(videoKeyFrameMs))
+    );
+    setIsDetectingFaces(false);
+
+    if (detected.error) {
+      setNotice(t("Failed to detect faces at key frame."));
+      return;
+    }
+
+    const frameWidth = detected.frameWidth || inputSize.width;
+    const frameHeight = detected.frameHeight || inputSize.height;
+    const screenRegions = mapMediaRegionsToScreen(
+      detected.regions || [],
+      frameWidth,
+      frameHeight
+    ).map((region: Region) => ({
+      x: region.x,
+      y: region.y,
+      width: region.width,
+      height: region.height,
+    }));
+
+    setRegions(screenRegions);
+    setSelectedRegionIndex(screenRegions.length ? 0 : null);
+    if (!screenRegions.length) {
+      setNotice(t("No face detected in selected areas."));
+    }
+  }, [inputSize, mapMediaRegionsToScreen, t, videoKeyFrameMs]);
+
+  const handleStartSwap = useCallback(async () => {
+    const me = kMirrorStates.me;
+    const input = kMirrorStates.input;
+    if (!me || !input) {
+      return;
+    }
+
+    const beginSwap = () => {
+      setNotice(null);
+      kMirrorStates.result = undefined;
+      rebuild.current();
+      setIsEditingRegions(false);
+      setSelectedRegionIndex(null);
+      setDraftRegion(null);
+      selectingRef.current = false;
+      startPointRef.current = null;
+      resizeRef.current = null;
+      moveRef.current = null;
+    };
+
+    if (input.type === "video") {
+      if (isMultiFaceMode) {
+        if (!regions.length) {
+          setNotice(t("Please select at least one area."));
+          return;
+        }
+
+        const videoRegions = toImageRegions();
+        if (!videoRegions.length) {
+          setNotice(t("Please select at least one area."));
+          return;
+        }
+
+        if (!faceSources.length) {
+          setNotice(t("Please add at least one face source."));
+          return;
+        }
+
+        if (videoRegions.some((region: Region) => !region.faceSourceId)) {
+          setNotice(t("Please assign a face source to each selected area."));
+          return;
+        }
+
+        beginSwap();
+
+        const result = await swapVideo({
+          inputVideo: input.path,
+          regions: videoRegions,
+          faceSources: faceSources.map((item: FaceAsset) => ({
+            id: item.id,
+            path: item.path,
+          })),
+          keyFrameMs: Math.max(0, Math.round(videoKeyFrameMs)),
+        });
+
+        setSuccess(result != null);
+        if (result) {
+          kMirrorStates.result = {
+            src: `${convertFileSrc(result)}?t=${Date.now()}`,
+            path: result,
+            type: "video",
+          };
+        } else {
+          setIsEditingRegions(true);
+        }
+        rebuild.current();
+        return;
+      }
+
+      beginSwap();
+
+      const result = await swapVideo({
+        inputVideo: input.path,
+        targetFace: me.path,
+      });
+
+      setSuccess(result != null);
+      if (result) {
+        kMirrorStates.result = {
+          src: `${convertFileSrc(result)}?t=${Date.now()}`,
+          path: result,
+          type: "video",
+        };
+      } else {
+        setIsEditingRegions(true);
+      }
+      rebuild.current();
+      return;
+    }
+
+    if (input.type !== "image") {
+      return;
+    }
+
     if (!regions.length) {
       setNotice(t("Please select at least one area."));
       return;
     }
+
     const imageRegions = toImageRegions();
-    console.log("[DEBUG] handleStartSwap - imageRegions:", imageRegions);
-    console.log("[DEBUG] handleStartSwap - 准备发送请求:", {
-      inputPath: kMirrorStates.input.path,
-      mePath: kMirrorStates.me.path,
-      regions: imageRegions,
-    });
     if (!imageRegions.length) {
       setNotice(t("Please select at least one area."));
       return;
     }
-    setNotice(null);
-    kMirrorStates.result = undefined;
-    rebuild.current();
-    setIsEditingRegions(false);
-    setSelectedRegionIndex(null);
-    setDraftRegion(null);
-    selectingRef.current = false;
-    startPointRef.current = null;
-    resizeRef.current = null;
-    moveRef.current = null;
+
+    if (isMultiFaceMode && !faceSources.length) {
+      setNotice(t("Please add at least one face source."));
+      return;
+    }
+
+    if (
+      isMultiFaceMode &&
+      imageRegions.some((region: Region) => !region.faceSourceId)
+    ) {
+      setNotice(t("Please assign a face source to each selected area."));
+      return;
+    }
+
+    beginSwap();
+
     const result = await swapFace(
-      kMirrorStates.input.path,
-      kMirrorStates.me.path,
-      imageRegions
+      isMultiFaceMode
+        ? {
+          inputImage: input.path,
+          regions: imageRegions,
+          faceSources: faceSources.map((item: FaceAsset) => ({
+            id: item.id,
+            path: item.path,
+          })),
+        }
+        : {
+          inputImage: input.path,
+          targetFace: me.path,
+          regions: imageRegions,
+        }
     );
+
     setSuccess(result != null);
     if (result) {
       kMirrorStates.result = {
@@ -465,15 +900,40 @@ export function MirrorPage() {
       setIsEditingRegions(true);
     }
     rebuild.current();
-  }, [isImageInput, regions, swapFace, t, toImageRegions]);
+  }, [
+    faceSources,
+    isMultiFaceMode,
+    regions,
+    swapFace,
+    swapVideo,
+    t,
+    toImageRegions,
+    videoKeyFrameMs,
+  ]);
 
-  const { ref, isOverTarget } = useDragDrop(async (paths) => {
+  const { ref, isOverTarget } = useDragDrop(async (paths: string[]) => {
+    if (!paths.length) {
+      return;
+    }
+
+    const shouldAddFaceSources =
+      !kMirrorStates.isMe &&
+      isEditingRegions &&
+      isMultiFaceMode &&
+      !!kMirrorStates.input &&
+      (kMirrorStates.input.type === "image" ||
+        kMirrorStates.input.type === "video");
+
+    if (shouldAddFaceSources) {
+      addFaceSourcesFromPaths(paths);
+      return;
+    }
+
     const path = paths[0];
     const src = convertFileSrc(path);
     const isVideo = isVideoFile(path);
     const isImage = isImageFile(path);
     const ext = getFileExtension(path);
-
     const isHeic = ext === ".heic" || ext === ".heif";
 
     if (kMirrorStates.isMe) {
@@ -513,40 +973,19 @@ export function MirrorPage() {
     if (kMirrorStates.me && kMirrorStates.input) {
       kMirrorStates.result = undefined;
       rebuild.current();
-      const isVideoTask = kMirrorStates.input.type === "video";
-      if (isVideoTask) {
-        setIsEditingRegions(false);
-        const result = await swapVideo(
-          kMirrorStates.input.path,
-          kMirrorStates.me.path
-        );
-        setSuccess(result != null);
-        if (result) {
-          kMirrorStates.result = {
-            src: `${convertFileSrc(result)}?t=${Date.now()}`,
-            path: result,
-            type: "video",
-          };
-          rebuild.current();
-        }
-      } else {
-        setIsEditingRegions(true);
-      }
+      setIsEditingRegions(true);
     }
   });
 
   const isReady = kMirrorStates.me && kMirrorStates.input;
-  const isVideoInput = kMirrorStates.input?.type === "video";
   const hasRegions = regions.length > 0;
   const selectionTips =
-    isImageInput &&
-      isReady &&
-      !isSwapping &&
-      !kMirrorStates.isMe &&
-      isEditingRegions
+    isReady && !isSwapping && !kMirrorStates.isMe && isEditingRegions
       ? hasRegions
         ? t("Click Start to swap selected areas.")
-        : t("Draw boxes to select areas.")
+        : isVideoInput
+          ? t("Pick a key frame, then detect faces or draw boxes.")
+          : t("Draw boxes to select areas.")
       : null;
 
   // Map error codes to user-friendly messages
@@ -564,6 +1003,13 @@ export function MirrorPage() {
       "video-open-failed": t("Failed to open video file."),
       "video-write-failed": t("Failed to write output video file."),
       "video-output-missing": t("Video swap failed. Output file missing."),
+      "missing-face-sources": t("Please add at least one face source."),
+      "invalid-face-source-binding": t(
+        "Please assign a face source to each selected area."
+      ),
+      "face-source-not-found": t(
+        "Please assign a face source to each selected area."
+      ),
     };
     return errorMap[error] || null;
   };
@@ -592,17 +1038,19 @@ export function MirrorPage() {
           ? isVideoInput
             ? t("Video swapping... This may take a while, please wait.")
             : t("Face swapping... This may take a few seconds, please wait.")
-          : selectionTips
-            ? selectionTips
-            : swapErrorMessage
-              ? swapErrorMessage
-              : success
-                ? isVideoInput
-                  ? t("Face swap successful! Video saved locally.")
-                  : t("Face swap successful! Image saved locally.")
-                : isVideoInput
-                  ? t("Video face swap failed. Try a different video.")
-                  : t("Face swap failed. Try a different image.");
+          : isDetectingFaces
+            ? t("Detecting faces...")
+            : selectionTips
+              ? selectionTips
+              : swapErrorMessage
+                ? swapErrorMessage
+                : success
+                  ? isVideoInput
+                    ? t("Face swap successful! Video saved locally.")
+                    : t("Face swap successful! Image saved locally.")
+                  : isVideoInput
+                    ? t("Video face swap failed. Try a different video.")
+                    : t("Face swap failed. Try a different image.");
 
   const previewSrc = kMirrorStates.isMe
     ? kMirrorStates.me?.src || background
@@ -618,6 +1066,14 @@ export function MirrorPage() {
 
   return (
     <div data-tauri-drag-region className="w-100vw h-100vh p-40px">
+      <input
+        ref={faceSourceInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={handleFaceSourceInputChange}
+      />
       <div ref={ref} className="relative w-full h-full">
         <div className="absolute top-[-40px] w-full flex-c-c c-white z-10">
           <p className="bg-black p-[4px_8px]">{tips}</p>
@@ -646,6 +1102,11 @@ export function MirrorPage() {
                     }}
                   >
                     {t("Switch")}
+                  </div>
+                )}
+                {!kMirrorStates.isMe && (isImageInput || isVideoInput) && (
+                  <div onClick={handleToggleMultiFaceMode}>
+                    {isMultiFaceMode ? t("Single-Face Mode") : t("Multi-Face Swap")}
                   </div>
                 )}
                 <div onClick={() => open(t("aboutLink"))}>{t("About")}</div>
@@ -683,13 +1144,34 @@ export function MirrorPage() {
               >
                 {previewType === "video" ? (
                   <video
+                    ref={previewVideoRef}
                     src={previewSrc}
                     className="preview-media"
                     style={{ objectFit: selectionObjectFit }}
-                    autoPlay
-                    loop
+                    autoPlay={!showSelection}
+                    loop={!showSelection}
                     muted
                     playsInline
+                    onLoadedMetadata={(event) => {
+                      const media = event.currentTarget;
+                      if (media.videoWidth > 0 && media.videoHeight > 0) {
+                        setInputSize({
+                          width: media.videoWidth,
+                          height: media.videoHeight,
+                        });
+                      }
+                      const durationSeconds = Number.isFinite(media.duration)
+                        ? Math.max(0, media.duration)
+                        : 0;
+                      const durationMs = Math.round(durationSeconds * 1000);
+                      setVideoDurationMs(durationMs);
+                      setVideoKeyFrameMs((prev: number) =>
+                        Math.min(prev, durationMs)
+                      );
+                      if (showSelection) {
+                        media.pause();
+                      }
+                    }}
                   />
                 ) : (
                   <img
@@ -751,6 +1233,38 @@ export function MirrorPage() {
                 )}
               </div>
             </div>
+            {showSelection && isVideoInput && (
+              <div
+                className="video-timeline-panel"
+                onPointerDown={(
+                  event: PointerEvent<HTMLDivElement>
+                ) => event.stopPropagation()}
+              >
+                <div className="video-timeline-row">
+                  <span className="video-timeline-label">{t("Key Frame")}</span>
+                  <input
+                    className="video-timeline-slider"
+                    type="range"
+                    min={0}
+                    max={Math.max(videoDurationMs, 0)}
+                    step={40}
+                    value={Math.min(videoKeyFrameMs, Math.max(videoDurationMs, 0))}
+                    onChange={handleVideoTimelineChange}
+                  />
+                  <span className="video-timeline-value">
+                    {(Math.max(videoKeyFrameMs, 0) / 1000).toFixed(2)}s
+                  </span>
+                  <div
+                    className={`selection-btn ${isDetectingFaces || !inputSize ? "disabled" : ""}`}
+                    onClick={handleDetectVideoFacesAtKeyFrame}
+                  >
+                    {isDetectingFaces
+                      ? t("Detecting faces...")
+                      : t("Detect Faces")}
+                  </div>
+                </div>
+              </div>
+            )}
             {showToolbar && (
               <div
                 className="selection-toolbar"
@@ -759,7 +1273,7 @@ export function MirrorPage() {
                 ) => event.stopPropagation()}
               >
                 <div
-                  className={`selection-btn ${regions.length ? "" : "disabled"}`}
+                  className={`selection-btn ${canStartSwap ? "" : "disabled"}`}
                   onClick={handleStartSwap}
                 >
                   {t("Start Swap")}
@@ -790,6 +1304,90 @@ export function MirrorPage() {
                 </div>
               </div>
             )}
+            {showSelection && isMultiFaceMode && (
+              <div
+                className={`face-source-panel ${isVideoInput ? "video-mode" : ""}`}
+                onPointerDown={(
+                  event: PointerEvent<HTMLDivElement>
+                ) => event.stopPropagation()}
+              >
+                <div className="face-source-header">
+                  <span>{t("Face Source Pool")}</span>
+                  <div className="selection-btn" onClick={handleOpenFaceSourcePicker}>
+                    {t("Add Face Sources")}
+                  </div>
+                </div>
+                {selectedRegionIndex !== null && (
+                  <div className="face-source-bind-row">
+                    <span>
+                      {t("Selected area")} #{selectedRegionIndex + 1}
+                    </span>
+                    <select
+                      className="face-source-select"
+                      value={regions[selectedRegionIndex]?.faceSourceId || ""}
+                      onChange={(event) =>
+                        handleAssignSelectedRegionFaceSource(event.target.value)
+                      }
+                    >
+                      <option value="">{t("Select a face source")}</option>
+                      {faceSources.map((source, index) => (
+                        <option key={source.id} value={source.id}>
+                          {source.locked
+                            ? t("Default Face")
+                            : `${t("Face Source")} ${index + 1}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div className="face-source-list">
+                  {faceSources.map((source, index) => {
+                    const selectedFaceSourceId =
+                      selectedRegionIndex === null
+                        ? ""
+                        : regions[selectedRegionIndex]?.faceSourceId || "";
+                    const isSelected = selectedFaceSourceId === source.id;
+                    return (
+                      <div
+                        key={source.id}
+                        className={`face-source-card ${isSelected ? "selected" : ""}`}
+                        onClick={() => handleAssignSelectedRegionFaceSource(source.id)}
+                      >
+                        <img
+                          src={source.src}
+                          className="face-source-thumb"
+                          draggable={false}
+                        />
+                        <div className="face-source-meta">
+                          <span className="face-source-title">
+                            {source.locked
+                              ? t("Default Face")
+                              : `${t("Face Source")} ${index + 1}`}
+                          </span>
+                          {!source.locked && (
+                            <button
+                              type="button"
+                              className="face-source-remove"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                handleRemoveFaceSource(source.id);
+                              }}
+                            >
+                              {t("Remove")}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {!faceSources.length && (
+                  <div className="face-source-empty">
+                    {t("No face sources yet. Add images to begin.")}
+                  </div>
+                )}
+              </div>
+            )}
             {isVideoInput && isSwapping && (
               <div className="video-progress-panel">
                 <ProgressBar progress={videoProgress} width="360px" height="6px" />
@@ -812,6 +1410,6 @@ export function MirrorPage() {
           </div>
         </div>
       </div>
-    </div >
+    </div>
   );
 }

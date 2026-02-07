@@ -11,19 +11,37 @@ export interface Region {
   y: number;
   width: number;
   height: number;
+  faceSourceId?: string;
+}
+
+export interface FaceSource {
+  id: string;
+  path: string;
 }
 
 export interface Task {
   id: string;
   inputImage: string;
-  targetFace: string;
+  targetFace?: string;
   regions?: Region[];
+  faceSources?: FaceSource[];
 }
 
 export interface VideoTask {
   id: string;
   inputVideo: string;
-  targetFace: string;
+  targetFace?: string;
+  regions?: Region[];
+  faceSources?: FaceSource[];
+  keyFrameMs?: number;
+}
+
+export interface DetectFacesResult {
+  regions: Region[];
+  frameWidth?: number;
+  frameHeight?: number;
+  frameIndex?: number;
+  error?: string;
 }
 
 export interface TaskResult {
@@ -189,6 +207,107 @@ class _Server {
     } catch (error) {
       console.error("[Server] 图片换脸请求异常:", error);
       return { result: null, error: "network" };
+    }
+  }
+
+  async detectImageFaces(inputImage: string, regions?: Region[]): Promise<DetectFacesResult> {
+    try {
+      const res = await fetch(`${this._baseURL}/task/detect-faces`, {
+        method: "post",
+        headers: {
+          "Content-Type": "application/json;charset=UTF-8",
+        },
+        body: JSON.stringify({
+          inputImage,
+          regions,
+        }),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        try {
+          const data = JSON.parse(errorText);
+          return {
+            regions: [],
+            error: data?.error || `http-${res.status}`,
+          };
+        } catch {
+          return {
+            regions: [],
+            error: `http-${res.status}`,
+          };
+        }
+      }
+
+      const data = await res.json();
+      return {
+        regions: Array.isArray(data?.regions) ? data.regions : [],
+        error: data?.error,
+      };
+    } catch {
+      return {
+        regions: [],
+        error: "network",
+      };
+    }
+  }
+
+  async detectVideoFaces(
+    inputVideo: string,
+    keyFrameMs: number,
+    regions?: Region[]
+  ): Promise<DetectFacesResult> {
+    try {
+      const res = await fetch(`${this._baseURL}/task/video/detect-faces`, {
+        method: "post",
+        headers: {
+          "Content-Type": "application/json;charset=UTF-8",
+        },
+        body: JSON.stringify({
+          inputVideo,
+          keyFrameMs,
+          regions,
+        }),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        try {
+          const data = JSON.parse(errorText);
+          return {
+            regions: [],
+            error: data?.error || `http-${res.status}`,
+          };
+        } catch {
+          return {
+            regions: [],
+            error: `http-${res.status}`,
+          };
+        }
+      }
+
+      const data = await res.json();
+      return {
+        regions: Array.isArray(data?.regions) ? data.regions : [],
+        frameWidth:
+          data?.frameWidth !== undefined && data?.frameWidth !== null
+            ? Number(data.frameWidth)
+            : undefined,
+        frameHeight:
+          data?.frameHeight !== undefined && data?.frameHeight !== null
+            ? Number(data.frameHeight)
+            : undefined,
+        frameIndex:
+          data?.frameIndex !== undefined && data?.frameIndex !== null
+            ? Number(data.frameIndex)
+            : undefined,
+        error: data?.error,
+      };
+    } catch {
+      return {
+        regions: [],
+        error: "network",
+      };
     }
   }
 

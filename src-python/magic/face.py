@@ -102,6 +102,63 @@ def swap_face_regions(input_path, face_path, regions):
         raise
 
 
+def swap_face_regions_by_sources(input_path, face_sources, regions):
+    try:
+        save_path = _get_output_file_path(input_path)
+        input_img = _read_image(input_path)
+        height, width = input_img.shape[:2]
+
+        normalized_regions = _normalize_regions_with_face_source(regions, width, height)
+        if not normalized_regions:
+            raise RuntimeError("invalid-face-source-binding")
+
+        destination_faces = {}
+        for source_id, source_path in face_sources.items():
+            destination_face = _get_one_face(source_path)
+            if destination_face is None:
+                raise RuntimeError("no-face-detected")
+            destination_faces[str(source_id)] = destination_face
+
+        output_img = input_img.copy()
+        swapped_count = 0
+
+        for region in normalized_regions:
+            x, y, w, h = region["x"], region["y"], region["width"], region["height"]
+            source_id = region["faceSourceId"]
+
+            destination_face = destination_faces.get(source_id)
+            if destination_face is None:
+                raise RuntimeError("face-source-not-found")
+
+            crop = input_img[y : y + h, x : x + w]
+            with _tf_lock:
+                reference_face = _tf.get_one_face(crop)
+            if reference_face is None:
+                continue
+
+            with _tf_lock:
+                output_crop = _tf.swap_face(
+                    vision_frame=crop,
+                    reference_face=reference_face,
+                    destination_face=destination_face,
+                )
+
+            if output_crop is None:
+                continue
+
+            output_img[y : y + h, x : x + w] = output_crop
+            swapped_count += 1
+
+        if swapped_count == 0:
+            return _write_image(save_path, output_img)
+
+        return _write_image(save_path, output_img)
+
+    except Exception as e:
+        _log_error("swap_face_regions_by_sources", e)
+        raise
+
+
 def swap_face_video(input_path, face_path, progress_callback=None):
     try:
         print(f"[INFO] 开始视频换脸: input={input_path}, face={face_path}")
@@ -383,6 +440,48 @@ def _normalize_regions(regions, width, height):
     return normalized
 
 
+def _normalize_regions_with_face_source(regions, width, height):
+    normalized = []
+    if not regions:
+        return normalized
+
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+
+        face_source_id = region.get("faceSourceId")
+        if not face_source_id:
+            continue
+
+        try:
+            x = int(region.get("x", 0))
+            y = int(region.get("y", 0))
+            w = int(region.get("width", 0))
+            h = int(region.get("height", 0))
+        except (TypeError, ValueError):
+            continue
+
+        if w <= 0 or h <= 0:
+            continue
+
+        x = max(0, min(x, width - 1))
+        y = max(0, min(y, height - 1))
+        w = max(1, min(w, width - x))
+        h = max(1, min(h, height - y))
+
+        normalized.append(
+            {
+                "x": x,
+                "y": y,
+                "width": w,
+                "height": h,
+                "faceSourceId": str(face_source_id),
+            }
+        )
+
+    return normalized
+
+
 def _get_output_file_path(file_name):
     base_name, ext = os.path.splitext(file_name)
     return base_name + "_output" + ext
@@ -430,3 +529,596 @@ def _get_model_path(file_name: str):
     return os.path.abspath(
         os.path.join(os.path.dirname(__file__), os.pardir, "models", file_name)
     )
+
+
+def detect_face_boxes_in_image(input_path, regions=None):
+    try:
+        vision = _read_image(input_path)
+        height, width = vision.shape[:2]
+        search_areas = (
+            _normalize_regions(regions, width, height)
+            if regions
+            else [(0, 0, width, height)]
+        )
+        boxes = _detect_face_boxes_in_frame(vision, search_areas)
+        return [{"x": x, "y": y, "width": w, "height": h} for x, y, w, h in boxes]
+    except Exception as e:
+        _log_error("detect_face_boxes_in_image", e)
+        raise
+
+
+def detect_face_boxes_in_video(input_path, key_frame_ms=0, regions=None):
+    cap = None
+    try:
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            raise RuntimeError("video-open-failed")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0:
+            fps = 25.0
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+        frame_index = 0
+        if key_frame_ms and fps > 0:
+            frame_index = int(round(max(0.0, float(key_frame_ms)) / 1000.0 * fps))
+        if total_frames > 0:
+            frame_index = max(0, min(frame_index, total_frames - 1))
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            raise RuntimeError("video-frame-read-failed")
+
+        if width <= 0 or height <= 0:
+            height, width = frame.shape[:2]
+
+        search_areas = (
+            _normalize_regions(regions, width, height)
+            if regions
+            else [(0, 0, width, height)]
+        )
+        boxes = _detect_face_boxes_in_frame(frame, search_areas)
+
+        return {
+            "regions": [{"x": x, "y": y, "width": w, "height": h} for x, y, w, h in boxes],
+            "frameWidth": width,
+            "frameHeight": height,
+            "frameIndex": frame_index,
+        }
+    except Exception as e:
+        _log_error("detect_face_boxes_in_video", e)
+        raise
+    finally:
+        if cap is not None:
+            cap.release()
+
+
+def swap_face_video_by_sources(
+    input_path, face_sources, regions, key_frame_ms=0, progress_callback=None
+):
+    try:
+        if not os.path.exists(input_path):
+            raise FileNotFoundError("file-not-found")
+
+        save_path = _get_output_video_path(input_path)
+        output_path = _swap_face_video_by_sources(
+            input_path=input_path,
+            face_sources=face_sources,
+            regions=regions,
+            key_frame_ms=key_frame_ms,
+            save_path=save_path,
+            progress_callback=progress_callback,
+        )
+
+        if not output_path or not os.path.exists(output_path):
+            raise RuntimeError("video-output-missing")
+
+        try:
+            _try_mux_audio(input_path, output_path)
+        except Exception as e:
+            print(f"[WARN] 音频复用失败，将返回无音轨视频: {str(e)}")
+
+        return output_path
+    except Exception as e:
+        _log_error("swap_face_video_by_sources", e)
+        raise
+
+
+def _swap_face_video_by_sources(
+    input_path, face_sources, regions, key_frame_ms, save_path, progress_callback=None
+):
+    cap = None
+    writer = None
+    try:
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            raise RuntimeError("video-open-failed")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0:
+            fps = 25.0
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+        if width <= 0 or height <= 0:
+            ok, first_frame = cap.read()
+            if not ok or first_frame is None:
+                raise RuntimeError("video-open-failed")
+            height, width = first_frame.shape[:2]
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        normalized_regions = _normalize_regions_with_face_source(regions, width, height)
+        if not normalized_regions:
+            raise RuntimeError("invalid-face-source-binding")
+
+        destination_faces = {}
+        for source_id, source_path in face_sources.items():
+            destination_face = _get_one_face(source_path)
+            if destination_face is None:
+                raise RuntimeError("no-face-detected")
+            destination_faces[str(source_id)] = destination_face
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(save_path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            raise RuntimeError("video-write-failed")
+
+        key_frame_index = 0
+        if key_frame_ms and fps > 0:
+            key_frame_index = int(round(max(0.0, float(key_frame_ms)) / 1000.0 * fps))
+        if total_frames > 0:
+            key_frame_index = max(0, min(key_frame_index, total_frames - 1))
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, key_frame_index)
+        ok, key_frame = cap.read()
+        if not ok or key_frame is None:
+            raise RuntimeError("video-frame-read-failed")
+
+        key_detections = _get_faces_with_boxes(key_frame)
+        tracks = _build_tracks_from_seed_regions(normalized_regions, key_detections)
+        if not tracks:
+            raise RuntimeError("no-face-in-selected-regions")
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        frame_count = 0
+        processed_faces = 0
+        start_time = time.time()
+
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_count += 1
+
+            detections = _get_faces_with_boxes(frame)
+            matches = _match_tracks_to_detections(tracks, detections)
+
+            matched_track_ids = set()
+            out = frame
+
+            for track_id, det_idx in matches:
+                track = tracks.get(track_id)
+                if track is None:
+                    continue
+                detection = detections[det_idx]
+                track["box"] = detection["box"]
+                track["missed"] = 0
+                matched_track_ids.add(track_id)
+
+                source_id = track.get("faceSourceId")
+                destination_face = destination_faces.get(str(source_id))
+                if destination_face is None:
+                    continue
+
+                reference_face = detection.get("face")
+                if reference_face is None:
+                    continue
+
+                try:
+                    with _tf_lock:
+                        swapped = _tf.swap_face(
+                            vision_frame=out,
+                            reference_face=reference_face,
+                            destination_face=destination_face,
+                        )
+                    if swapped is not None:
+                        out = swapped
+                        processed_faces += 1
+                except Exception as e:
+                    print(f"[WARN] 帧{frame_count} 轨迹{track_id} 换脸失败: {str(e)}")
+
+            stale_track_ids = []
+            for track_id, track in tracks.items():
+                if track_id in matched_track_ids:
+                    continue
+                track["missed"] = int(track.get("missed", 0)) + 1
+                if track["missed"] > 45:
+                    stale_track_ids.append(track_id)
+
+            for track_id in stale_track_ids:
+                tracks.pop(track_id, None)
+
+            out = _normalize_output_frame(out, width, height)
+            writer.write(out)
+
+            if progress_callback and frame_count % 5 == 0:
+                try:
+                    progress_callback(
+                        frame_count=frame_count,
+                        total_frames=total_frames,
+                        elapsed_seconds=max(0.0, time.time() - start_time),
+                    )
+                except Exception as e:
+                    print(f"[WARN] progress_callback failed: {str(e)}")
+
+        if progress_callback:
+            try:
+                final_total = total_frames if total_frames > 0 else frame_count
+                progress_callback(
+                    frame_count=final_total,
+                    total_frames=final_total,
+                    elapsed_seconds=max(0.0, time.time() - start_time),
+                )
+            except Exception as e:
+                print(f"[WARN] progress_callback(final) failed: {str(e)}")
+
+        print(
+            f"[INFO] 视频多人换脸完成: 总帧={frame_count}, 成功换脸人次={processed_faces}, 轨迹数={len(tracks)}"
+        )
+        return save_path
+
+    except Exception as e:
+        _log_error("_swap_face_video_by_sources", e)
+        raise
+    finally:
+        if cap is not None:
+            cap.release()
+        if writer is not None:
+            writer.release()
+
+
+def _normalize_output_frame(frame, width, height):
+    out = frame
+    if out is None:
+        out = np.zeros((height, width, 3), dtype=np.uint8)
+    if len(out.shape) == 2:
+        out = cv2.cvtColor(out, cv2.COLOR_GRAY2BGR)
+    elif len(out.shape) == 3 and out.shape[2] == 4:
+        out = cv2.cvtColor(out, cv2.COLOR_BGRA2BGR)
+    if out.shape[1] != width or out.shape[0] != height:
+        out = cv2.resize(out, (width, height), interpolation=cv2.INTER_LINEAR)
+    if out.dtype != np.uint8:
+        out = cv2.normalize(out, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    return out
+
+
+def _detect_face_boxes_in_frame(frame, search_areas):
+    frame_h, frame_w = frame.shape[:2]
+    boxes = []
+    for area in search_areas:
+        x, y, w, h = area
+        crop = frame[y : y + h, x : x + w]
+        detections = _get_faces_with_boxes(crop)
+        for det in detections:
+            bx, by, bw, bh = det["box"]
+            gx = x + bx
+            gy = y + by
+            sq = _expand_square_box(gx, gy, bw, bh, frame_w, frame_h)
+            if sq is not None:
+                boxes.append(sq)
+
+    deduped = _dedupe_boxes(boxes, iou_threshold=0.45)
+    deduped.sort(key=lambda b: (b[1], b[0]))
+    return deduped
+
+
+def _get_faces_with_boxes(frame):
+    faces = []
+    with _tf_lock:
+        if hasattr(_tf, "get_many_faces"):
+            try:
+                many = _tf.get_many_faces(frame)
+                if many:
+                    faces = list(many)
+            except Exception:
+                faces = []
+
+        if not faces:
+            try:
+                one = _tf.get_one_face(frame)
+                if one is not None:
+                    faces = [one]
+            except Exception:
+                faces = []
+
+    frame_h, frame_w = frame.shape[:2]
+    out = []
+    for face in faces:
+        box = _extract_face_box(face, frame_w, frame_h)
+        if box is None:
+            continue
+        out.append({"face": face, "box": box})
+    return out
+
+
+def _extract_face_box(face_obj, frame_w, frame_h):
+    candidates = [
+        face_obj,
+        getattr(face_obj, "bbox", None),
+        getattr(face_obj, "box", None),
+        getattr(face_obj, "rect", None),
+        getattr(face_obj, "bounding_box", None),
+    ]
+
+    for item in candidates:
+        box = _parse_box_like(item, frame_w, frame_h)
+        if box is not None:
+            return box
+
+    if isinstance(face_obj, dict):
+        for key in ("bbox", "box", "rect", "bounding_box"):
+            box = _parse_box_like(face_obj.get(key), frame_w, frame_h)
+            if box is not None:
+                return box
+
+    return None
+
+
+def _parse_box_like(raw, frame_w, frame_h):
+    if raw is None:
+        return None
+
+    if isinstance(raw, dict):
+        if all(k in raw for k in ("x", "y", "width", "height")):
+            x = _to_int(raw.get("x"))
+            y = _to_int(raw.get("y"))
+            w = _to_int(raw.get("width"))
+            h = _to_int(raw.get("height"))
+            return _clamp_box(x, y, w, h, frame_w, frame_h)
+        if all(k in raw for k in ("x1", "y1", "x2", "y2")):
+            x1 = _to_float(raw.get("x1"))
+            y1 = _to_float(raw.get("y1"))
+            x2 = _to_float(raw.get("x2"))
+            y2 = _to_float(raw.get("y2"))
+            return _from_xyxy(x1, y1, x2, y2, frame_w, frame_h)
+
+    if isinstance(raw, (list, tuple, np.ndarray)) and len(raw) >= 4:
+        a = _to_float(raw[0])
+        b = _to_float(raw[1])
+        c = _to_float(raw[2])
+        d = _to_float(raw[3])
+
+        if max(abs(a), abs(b), abs(c), abs(d)) <= 2.0:
+            a *= frame_w
+            c *= frame_w
+            b *= frame_h
+            d *= frame_h
+
+        if c > a and d > b:
+            return _from_xyxy(a, b, c, d, frame_w, frame_h)
+
+        return _clamp_box(_to_int(a), _to_int(b), _to_int(c), _to_int(d), frame_w, frame_h)
+
+    # 对象字段尝试
+    attrs = vars(raw) if hasattr(raw, "__dict__") else {}
+    if attrs:
+        return _parse_box_like(attrs, frame_w, frame_h)
+
+    return None
+
+
+def _from_xyxy(x1, y1, x2, y2, frame_w, frame_h):
+    x = _to_int(min(x1, x2))
+    y = _to_int(min(y1, y2))
+    w = _to_int(abs(x2 - x1))
+    h = _to_int(abs(y2 - y1))
+    return _clamp_box(x, y, w, h, frame_w, frame_h)
+
+
+def _clamp_box(x, y, w, h, frame_w, frame_h):
+    if frame_w <= 0 or frame_h <= 0:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    x = max(0, min(int(x), frame_w - 1))
+    y = max(0, min(int(y), frame_h - 1))
+    w = max(1, min(int(w), frame_w - x))
+    h = max(1, min(int(h), frame_h - y))
+    return (x, y, w, h)
+
+
+def _to_int(value):
+    try:
+        return int(round(float(value)))
+    except Exception:
+        return 0
+
+
+def _to_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _expand_square_box(x, y, w, h, max_w, max_h, scale=1.35, min_size=48):
+    if w <= 0 or h <= 0:
+        return None
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+    side = max(float(w), float(h)) * float(scale)
+    side = max(float(min_size), side)
+
+    half = side / 2.0
+    left = int(round(cx - half))
+    top = int(round(cy - half))
+    right = int(round(cx + half))
+    bottom = int(round(cy + half))
+
+    left = max(0, left)
+    top = max(0, top)
+    right = min(max_w, right)
+    bottom = min(max_h, bottom)
+
+    nw = right - left
+    nh = bottom - top
+    size = min(nw, nh)
+    if size <= 2:
+        return None
+
+    # 再次强制为正方形
+    right = left + size
+    bottom = top + size
+    return _clamp_box(left, top, size, size, max_w, max_h)
+
+
+def _iou(box_a, box_b):
+    ax, ay, aw, ah = box_a
+    bx, by, bw, bh = box_b
+    a2x, a2y = ax + aw, ay + ah
+    b2x, b2y = bx + bw, by + bh
+
+    inter_x1 = max(ax, bx)
+    inter_y1 = max(ay, by)
+    inter_x2 = min(a2x, b2x)
+    inter_y2 = min(a2y, b2y)
+
+    iw = max(0, inter_x2 - inter_x1)
+    ih = max(0, inter_y2 - inter_y1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+
+    union = aw * ah + bw * bh - inter
+    if union <= 0:
+        return 0.0
+    return float(inter) / float(union)
+
+
+def _dedupe_boxes(boxes, iou_threshold=0.45):
+    out = []
+    for box in boxes:
+        keep = True
+        for kept in out:
+            if _iou(box, kept) >= iou_threshold:
+                keep = False
+                break
+        if keep:
+            out.append(box)
+    return out
+
+
+def _center_distance(box_a, box_b):
+    ax, ay, aw, ah = box_a
+    bx, by, bw, bh = box_b
+    acx = ax + aw / 2.0
+    acy = ay + ah / 2.0
+    bcx = bx + bw / 2.0
+    bcy = by + bh / 2.0
+    return float(((acx - bcx) ** 2 + (acy - bcy) ** 2) ** 0.5)
+
+
+def _build_tracks_from_seed_regions(seed_regions, detections):
+    if not seed_regions or not detections:
+        return {}
+
+    tracks = {}
+    used_det = set()
+    track_id = 1
+
+    for region in seed_regions:
+        region_box = (region["x"], region["y"], region["width"], region["height"])
+        best_idx = -1
+        best_iou = 0.0
+
+        for idx, det in enumerate(detections):
+            if idx in used_det:
+                continue
+            iou = _iou(region_box, det["box"])
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = idx
+
+        if best_idx < 0:
+            best_dist = None
+            for idx, det in enumerate(detections):
+                if idx in used_det:
+                    continue
+                dist = _center_distance(region_box, det["box"])
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+
+        if best_idx < 0:
+            continue
+
+        used_det.add(best_idx)
+        tracks[track_id] = {
+            "trackId": track_id,
+            "faceSourceId": str(region["faceSourceId"]),
+            "box": detections[best_idx]["box"],
+            "missed": 0,
+        }
+        track_id += 1
+
+    return tracks
+
+
+def _match_tracks_to_detections(tracks, detections):
+    if not tracks or not detections:
+        return []
+
+    track_ids = list(tracks.keys())
+    candidate_pairs = []
+
+    for tid in track_ids:
+        tbox = tracks[tid]["box"]
+        for didx, det in enumerate(detections):
+            iou = _iou(tbox, det["box"])
+            if iou > 0.05:
+                candidate_pairs.append((iou, tid, didx))
+
+    candidate_pairs.sort(reverse=True, key=lambda item: item[0])
+
+    matched_tracks = set()
+    matched_dets = set()
+    matches = []
+
+    for score, tid, didx in candidate_pairs:
+        if tid in matched_tracks or didx in matched_dets:
+            continue
+        matched_tracks.add(tid)
+        matched_dets.add(didx)
+        matches.append((tid, didx))
+
+    # 对未匹配轨迹做一次基于中心点的兜底匹配
+    for tid in track_ids:
+        if tid in matched_tracks:
+            continue
+        tbox = tracks[tid]["box"]
+        best_idx = -1
+        best_dist = None
+        for didx, det in enumerate(detections):
+            if didx in matched_dets:
+                continue
+            dist = _center_distance(tbox, det["box"])
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_idx = didx
+
+        if best_idx >= 0:
+            tw = max(1, tbox[2])
+            th = max(1, tbox[3])
+            max_dist = ((tw * tw + th * th) ** 0.5) * 0.65
+            if best_dist is not None and best_dist <= max_dist:
+                matched_tracks.add(tid)
+                matched_dets.add(best_idx)
+                matches.append((tid, best_idx))
+
+    return matches

@@ -15,13 +15,18 @@ function debounce(func: any, delay = 100) {
 
 export function useDragDrop(onDrop: (paths: string[]) => void) {
   const ref = useRef<any>(null);
+  const onDropRef = useRef(onDrop);
   const [isOverTarget, setIsOverTarget] = useState(false);
+
+  useEffect(() => {
+    onDropRef.current = onDrop;
+  }, [onDrop]);
 
   const onDropped = useCallback(
     debounce((paths: string[]) => {
-      onDrop(paths);
+      onDropRef.current(paths);
     }),
-    [onDrop]
+    []
   );
 
   useEffect(() => {
@@ -42,7 +47,7 @@ export function useDragDrop(onDrop: (paths: string[]) => void) {
 
     const setupListener = async () => {
       const unlisten = await getCurrentWebview().onDragDropEvent(
-        async (event) => {
+        async (event: { payload: DragDropEvent }) => {
           const isInside = await checkIsInside(event.payload);
           if (event.payload.type === "over") {
             setIsOverTarget(isInside);
