@@ -36,7 +36,15 @@ def load_models():
         return False
 
 
-@lru_cache(maxsize=12)
+def _emit_stage(stage_callback, stage: str):
+    if stage_callback is None:
+        return
+    try:
+        stage_callback(stage)
+    except Exception as e:
+        print(f"[WARN] stage_callback failed: {str(e)}")
+
+
 def swap_face(input_path, face_path):
     save_path = _get_output_file_path(input_path)
     output_img = _swap_face(input_path, face_path)
@@ -159,8 +167,9 @@ def swap_face_regions_by_sources(input_path, face_sources, regions):
         raise
 
 
-def swap_face_video(input_path, face_path, progress_callback=None):
+def swap_face_video(input_path, face_path, progress_callback=None, stage_callback=None):
     try:
+        _emit_stage(stage_callback, "validating-input")
         print(f"[INFO] 开始视频换脸: input={input_path}, face={face_path}")
 
         # 检查输入文件是否存在
@@ -173,18 +182,24 @@ def swap_face_video(input_path, face_path, progress_callback=None):
         print(f"[INFO] 输出路径: {save_path}")
 
         output_path = _swap_face_video(
-            input_path, face_path, save_path, progress_callback=progress_callback
+            input_path,
+            face_path,
+            save_path,
+            progress_callback=progress_callback,
+            stage_callback=stage_callback,
         )
 
         if not output_path or not os.path.exists(output_path):
             raise RuntimeError("video-output-missing")
 
         # 尝试使用 ffmpeg 把原视频音频复用到输出（OpenCV 写入的视频默认没有音轨）
+        _emit_stage(stage_callback, "muxing-audio")
         try:
             _try_mux_audio(input_path, output_path)
         except Exception as e:
             print(f"[WARN] 音频复用失败，将返回无音轨视频: {str(e)}")
 
+        _emit_stage(stage_callback, "finalizing")
         print(f"[SUCCESS] 视频换脸成功: {output_path}")
         return output_path
 
@@ -193,17 +208,25 @@ def swap_face_video(input_path, face_path, progress_callback=None):
         raise
 
 
-def _swap_face_video(input_path, face_path, save_path, progress_callback=None):
+def _swap_face_video(
+    input_path,
+    face_path,
+    save_path,
+    progress_callback=None,
+    stage_callback=None,
+):
     cap = None
     writer = None
 
     try:
+        _emit_stage(stage_callback, "opening-video")
         print(f"[INFO] 打开视频文件: {input_path}")
         cap = cv2.VideoCapture(input_path)
         if not cap.isOpened():
             raise RuntimeError("video-open-failed")
 
         # 获取视频属性
+        _emit_stage(stage_callback, "reading-video-metadata")
         fps = cap.get(cv2.CAP_PROP_FPS)
         if not fps or fps <= 0:
             fps = 25.0
@@ -339,7 +362,6 @@ def _swap_face_video(input_path, face_path, save_path, progress_callback=None):
             print("[INFO] 释放视频写入器")
 
 
-@lru_cache(maxsize=12)
 def _swap_face(input_path, face_path):
     vision = _read_image(input_path)
     reference_face = _get_one_face(input_path)
@@ -357,14 +379,12 @@ def _swap_face(input_path, face_path):
     return out
 
 
-@lru_cache(maxsize=12)
 def _get_one_face(face_path: str):
     face_img = _read_image(face_path)
     with _tf_lock:
         return _tf.get_one_face(face_img)
 
 
-@lru_cache(maxsize=12)
 def _read_image(img_path: str):
     data = np.fromfile(img_path, dtype=np.uint8)
     img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
@@ -535,12 +555,51 @@ def detect_face_boxes_in_image(input_path, regions=None):
     try:
         vision = _read_image(input_path)
         height, width = vision.shape[:2]
-        search_areas = (
-            _normalize_regions(regions, width, height)
-            if regions
-            else [(0, 0, width, height)]
-        )
-        boxes = _detect_face_boxes_in_frame(vision, search_areas)
+
+        # 优化：如果图片过大，先缩小进行检测，再映射回原坐标
+        # 限制最大边长为 1920，既能保证检测精度，又能大幅提升速度
+        max_size = 1920
+        scale = 1.0
+        if max(height, width) > max_size:
+            scale = max_size / max(height, width)
+            new_w = int(width * scale)
+            new_h = int(height * scale)
+            vision_resized = cv2.resize(vision, (new_w, new_h))
+            print(f"[INFO] 图片过大 ({width}x{height})，缩放至 {new_w}x{new_h} 进行检测")
+            
+            # 缩放 regions
+            search_areas_resized = []
+            if regions:
+                normalized = _normalize_regions(regions, width, height)
+                for x, y, w, h in normalized:
+                    search_areas_resized.append((
+                        int(x * scale),
+                        int(y * scale),
+                        int(w * scale),
+                        int(h * scale)
+                    ))
+            else:
+                search_areas_resized = [(0, 0, new_w, new_h)]
+            
+            boxes_resized = _detect_face_boxes_in_frame(vision_resized, search_areas_resized)
+            
+            # 映射回原图坐标
+            boxes = []
+            for bx, by, bw, bh in boxes_resized:
+                boxes.append((
+                    int(bx / scale),
+                    int(by / scale),
+                    int(bw / scale),
+                    int(bh / scale)
+                ))
+        else:
+            search_areas = (
+                _normalize_regions(regions, width, height)
+                if regions
+                else [(0, 0, width, height)]
+            )
+            boxes = _detect_face_boxes_in_frame(vision, search_areas)
+
         return [{"x": x, "y": y, "width": w, "height": h} for x, y, w, h in boxes]
     except Exception as e:
         _log_error("detect_face_boxes_in_image", e)
@@ -598,9 +657,15 @@ def detect_face_boxes_in_video(input_path, key_frame_ms=0, regions=None):
 
 
 def swap_face_video_by_sources(
-    input_path, face_sources, regions, key_frame_ms=0, progress_callback=None
+    input_path,
+    face_sources,
+    regions,
+    key_frame_ms=0,
+    progress_callback=None,
+    stage_callback=None,
 ):
     try:
+        _emit_stage(stage_callback, "validating-input")
         if not os.path.exists(input_path):
             raise FileNotFoundError("file-not-found")
 
@@ -612,16 +677,19 @@ def swap_face_video_by_sources(
             key_frame_ms=key_frame_ms,
             save_path=save_path,
             progress_callback=progress_callback,
+            stage_callback=stage_callback,
         )
 
         if not output_path or not os.path.exists(output_path):
             raise RuntimeError("video-output-missing")
 
+        _emit_stage(stage_callback, "muxing-audio")
         try:
             _try_mux_audio(input_path, output_path)
         except Exception as e:
             print(f"[WARN] 音频复用失败，将返回无音轨视频: {str(e)}")
 
+        _emit_stage(stage_callback, "finalizing")
         return output_path
     except Exception as e:
         _log_error("swap_face_video_by_sources", e)
@@ -629,15 +697,23 @@ def swap_face_video_by_sources(
 
 
 def _swap_face_video_by_sources(
-    input_path, face_sources, regions, key_frame_ms, save_path, progress_callback=None
+    input_path,
+    face_sources,
+    regions,
+    key_frame_ms,
+    save_path,
+    progress_callback=None,
+    stage_callback=None,
 ):
     cap = None
     writer = None
     try:
+        _emit_stage(stage_callback, "opening-video")
         cap = cv2.VideoCapture(input_path)
         if not cap.isOpened():
             raise RuntimeError("video-open-failed")
 
+        _emit_stage(stage_callback, "reading-video-metadata")
         fps = cap.get(cv2.CAP_PROP_FPS)
         if not fps or fps <= 0:
             fps = 25.0
@@ -657,6 +733,7 @@ def _swap_face_video_by_sources(
         if not normalized_regions:
             raise RuntimeError("invalid-face-source-binding")
 
+        _emit_stage(stage_callback, "extracting-target-face")
         destination_faces = {}
         for source_id, source_path in face_sources.items():
             destination_face = _get_one_face(source_path)
@@ -680,11 +757,13 @@ def _swap_face_video_by_sources(
         if not ok or key_frame is None:
             raise RuntimeError("video-frame-read-failed")
 
+        _emit_stage(stage_callback, "building-face-tracks")
         key_detections = _get_faces_with_boxes(key_frame)
         tracks = _build_tracks_from_seed_regions(normalized_regions, key_detections)
         if not tracks:
             raise RuntimeError("no-face-in-selected-regions")
 
+        _emit_stage(stage_callback, "processing-video-frames")
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         frame_count = 0
         processed_faces = 0

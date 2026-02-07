@@ -19,6 +19,7 @@ export function useSwapFace() {
     "videoSwapEtaSeconds",
     null
   );
+  const [videoStage, setVideoStage] = useXState<string | null>("videoSwapStage", null);
   const runTask = useCallback(
     async (create: (taskId: string) => Promise<TaskResult>) => {
       await kSwapFaceRefs.cancel?.();
@@ -46,6 +47,7 @@ export function useSwapFace() {
     async (task: Omit<Task, "id">) => {
       setVideoProgress(0);
       setVideoEtaSeconds(null);
+      setVideoStage(null);
       return runTask((taskId: string) =>
         Server.createTask({
           id: taskId,
@@ -53,7 +55,7 @@ export function useSwapFace() {
         })
       );
     },
-    [runTask, setVideoEtaSeconds, setVideoProgress]
+    [runTask, setVideoEtaSeconds, setVideoProgress, setVideoStage]
   );
 
   const swapVideo = useCallback(
@@ -64,6 +66,7 @@ export function useSwapFace() {
       setError(null);
       setVideoProgress(0);
       setVideoEtaSeconds(null);
+      setVideoStage("queued");
 
       const taskId = (kSwapFaceRefs.id++).toString();
       let polling = true;
@@ -74,8 +77,13 @@ export function useSwapFace() {
           if (state.status === "running" || state.status === "success") {
             setVideoProgress(state.progress ?? 0);
             setVideoEtaSeconds(state.etaSeconds ?? null);
+            setVideoStage(state.stage ?? null);
           } else if (state.status === "failed") {
             setVideoEtaSeconds(null);
+            setVideoStage(state.stage ?? "failed");
+          } else if (state.status === "cancelled") {
+            setVideoEtaSeconds(null);
+            setVideoStage(state.stage ?? "cancelled");
           }
           if (!polling) {
             break;
@@ -92,6 +100,7 @@ export function useSwapFace() {
         if (success) {
           setIsSwapping(false);
           setVideoEtaSeconds(null);
+          setVideoStage("cancelled");
         }
       };
 
@@ -110,6 +119,9 @@ export function useSwapFace() {
       if (result) {
         setVideoProgress(100);
         setVideoEtaSeconds(0);
+        setVideoStage("done");
+      } else {
+        setVideoStage("failed");
       }
       setIsSwapping(false);
       return result;
@@ -120,6 +132,7 @@ export function useSwapFace() {
       setOutput,
       setVideoEtaSeconds,
       setVideoProgress,
+      setVideoStage,
     ]
   );
 
@@ -135,6 +148,7 @@ export function useSwapFace() {
     error,
     videoProgress,
     videoEtaSeconds,
+    videoStage,
     swapFace,
     swapVideo,
     cancel: () => kSwapFaceRefs.cancel?.(),

@@ -11,11 +11,9 @@ def _boot_log_path() -> str:
     Release 包默认禁用控制台（Nuitka --windows-console-mode=disable），
     导致启动阶段异常会“无输出秒退”。这里把启动日志写到 exe 同目录，便于定位问题。
     """
-    if getattr(sys, "frozen", False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(__file__)
-    return os.path.join(base_dir or os.getcwd(), "server_boot.log")
+    import tempfile
+
+    return os.path.join(tempfile.gettempdir(), "magic_mirror_boot.log")
 
 
 def _append_boot_log(text: str) -> None:

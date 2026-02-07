@@ -145,6 +145,12 @@
 .selection-rect.selected {
   border-color: #ffd24d;
   background: rgba(255, 210, 77, 0.18);
+  z-index: 5;
+}
+
+.selection-rect.assigned {
+  border-color: #52c41a;
+  background: rgba(82, 196, 26, 0.15);
 }
 
 .selection-handle {
@@ -204,7 +210,7 @@
 .selection-toolbar {
   position: absolute;
   /* move toolbar outside the circular preview to avoid covering content */
-  bottom: -54px;
+  top: -54px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 6;

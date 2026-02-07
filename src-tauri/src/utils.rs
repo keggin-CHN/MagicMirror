@@ -1,5 +1,4 @@
 use futures_util::StreamExt;
-use reqwest::header::CONTENT_LENGTH;
 use reqwest::Client;
 use std::fs::{self, create_dir_all, File};
 use std::io::{copy, Write};
@@ -17,23 +16,6 @@ pub fn timestamp() -> u128 {
     duration.as_millis()
 }
 
-pub async fn content_length(client: Client, url: &String) -> Result<u64, reqwest::Error> {
-    let response = match client.get(url).header("Range", "bytes=0-").send().await {
-        Ok(res) => res,
-        Err(e) => return Err(e),
-    };
-
-    if let Some(content_length) = response.headers().get(CONTENT_LENGTH) {
-        if let Some(value) = content_length.to_str().ok() {
-            if let Ok(size) = value.parse::<u64>() {
-                return Ok(size);
-            }
-        }
-    }
-
-    Ok(0)
-}
-
 pub async fn download_file(
     app: &AppHandle,
     url: &String,
@@ -49,7 +31,7 @@ pub async fn download_file(
         }
     };
 
-    let total_size = content_length(client, url).await.unwrap_or(0);
+    let total_size = response.content_length().unwrap_or(0);
     let mut downloaded = 0u64;
     let mut file = match File::create(&temp_path) {
         Ok(f) => f,
@@ -70,7 +52,7 @@ pub async fn download_file(
         if let Err(e) = file.write_all(&chunk) {
             return Err(format!("Failed to write chunk to file: {}", e));
         }
-        downloaded = std::cmp::min(downloaded + (chunk.len() as u64), total_size);
+        downloaded += chunk.len() as u64;
         if total_size > 0 {
             let progress = downloaded as f64 / total_size as f64 * 100.0;
             app.emit("download-progress", progress).unwrap_or_default();

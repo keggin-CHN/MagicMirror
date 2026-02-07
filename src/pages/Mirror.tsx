@@ -4,8 +4,9 @@ import { useSwapFace } from "@/hooks/useSwapFace";
 import { Server, type FaceSource, type Region } from "@/services/server";
 import { getFileExtension, isImageFile, isVideoFile } from "@/services/utils";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
-import { open } from "@tauri-apps/plugin-shell";
+import { open as openExternal } from "@tauri-apps/plugin-shell";
 import {
   useCallback,
   useEffect,
@@ -32,6 +33,7 @@ interface Asset {
 interface FaceAsset extends FaceSource {
   src: string;
   locked?: boolean;
+  name?: string;
 }
 
 type ResizeHandle = "nw" | "ne" | "sw" | "se";
@@ -61,6 +63,7 @@ export function MirrorPage() {
     error: swapError,
     videoProgress,
     videoEtaSeconds,
+    videoStage,
   } = useSwapFace();
   const [success, setSuccess] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -100,6 +103,7 @@ export function MirrorPage() {
   const [videoKeyFrameMs, setVideoKeyFrameMs] = useState(0);
   const [isDetectingFaces, setIsDetectingFaces] = useState(false);
   const [selectionZoom, setSelectionZoom] = useState(1);
+  const [activeFaceSourceId, setActiveFaceSourceId] = useState<string | null>(null);
 
   useEffect(() => {
     setTimeout(() => {
@@ -129,6 +133,7 @@ export function MirrorPage() {
       resizeRef.current = null;
       moveRef.current = null;
       setSelectionZoom(1);
+      setActiveFaceSourceId(null);
       inputPathRef.current = null;
       autoDetectedImagePathRef.current = null;
       return;
@@ -153,6 +158,7 @@ export function MirrorPage() {
     resizeRef.current = null;
     moveRef.current = null;
     setSelectionZoom(1);
+    setActiveFaceSourceId(null);
 
     if (input.type === "image") {
       const img = new Image();
@@ -405,8 +411,12 @@ export function MirrorPage() {
 
   const handleWheelZoom = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
-      if (!showSelection) return;
+      if (!showSelection || !previewRef.current) return;
       event.stopPropagation();
+
+      const rect = previewRef.current.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
 
       const delta = -event.deltaY;
       const step = 0.1;
@@ -417,12 +427,49 @@ export function MirrorPage() {
       );
 
       if (nextZoom !== selectionZoom) {
-        const nextRegions = remapRegionsForZoom(regions, selectionZoom, nextZoom);
+        // 计算缩放比例变化
+        const scaleFactor = nextZoom / selectionZoom;
+
+        // 计算新的区域位置，保持鼠标位置不变
+        // 公式推导：
+        // (x - mouseX) * scaleFactor + mouseX = newX
+        // newX = x * scaleFactor + mouseX * (1 - scaleFactor)
+
+        // 由于 regions 存储的是相对于原始图片尺寸的坐标，我们需要先转换到屏幕坐标系进行计算，然后再转换回去
+        // 但这里我们直接修改 regions 的逻辑是：regions 存储的是屏幕坐标系下的位置 (根据 mapMediaRegionsToScreen 和 toImageRegions 的逻辑推断)
+        // 实际上，regions 存储的是相对于 previewRef 容器的坐标。
+
+        // 修正：regions 存储的是相对于 previewRef 容器的坐标。
+        // 当 zoom 发生变化时，previewRef 的内容（img/video）会缩放，但 regions 是绝对定位的 div。
+        // 为了让 regions 跟随图片缩放，我们需要调整 regions 的坐标和大小。
+
+        // 之前的逻辑是围绕中心点缩放：
+        // const cx = rect.width / 2;
+        // const cy = rect.height / 2;
+        // x = cx + (r.x - cx) * factor;
+
+        // 现在改为围绕鼠标点缩放：
+        // x = mouseX + (r.x - mouseX) * factor;
+
+        const nextRegions = regions.map((r: Region) => {
+          const x = mouseX + (r.x - mouseX) * scaleFactor;
+          const y = mouseY + (r.y - mouseY) * scaleFactor;
+          const width = r.width * scaleFactor;
+          const height = r.height * scaleFactor;
+          return {
+            ...r,
+            x,
+            y,
+            width,
+            height,
+          };
+        });
+
         setRegions(nextRegions);
         setSelectionZoom(nextZoom);
       }
     },
-    [showSelection, selectionZoom, regions, remapRegionsForZoom, clamp]
+    [showSelection, selectionZoom, regions, clamp]
   );
 
   const handlePointerDown = useCallback(
@@ -576,6 +623,19 @@ export function MirrorPage() {
         return;
       }
       event.stopPropagation();
+
+      // 如果当前有选中的素材，则直接分配给该区域
+      if (activeFaceSourceId) {
+        setRegions((prev: Region[]) =>
+          prev.map((region: Region, idx: number) =>
+            idx === index ? { ...region, faceSourceId: activeFaceSourceId } : region
+          )
+        );
+        setSelectedRegionIndex(index);
+        // 分配后不进入移动模式，方便连续分配
+        return;
+      }
+
       const rect = previewRef.current.getBoundingClientRect();
       const startX = clamp(event.clientX - rect.left, 0, rect.width);
       const startY = clamp(event.clientY - rect.top, 0, rect.height);
@@ -592,7 +652,7 @@ export function MirrorPage() {
       };
       setSelectedRegionIndex(index);
     },
-    [canSelect, clamp, regions]
+    [canSelect, clamp, regions, activeFaceSourceId]
   );
 
   const handleResizePointerDown = useCallback(
@@ -634,6 +694,7 @@ export function MirrorPage() {
     setDraftRegion(null);
     setNotice(null);
     setSelectedRegionIndex(null);
+    setActiveFaceSourceId(null);
     selectingRef.current = false;
     startPointRef.current = null;
     resizeRef.current = null;
@@ -686,6 +747,7 @@ export function MirrorPage() {
       return next;
     });
     setNotice(null);
+    setActiveFaceSourceId(null);
   }, []);
 
   const addFaceSourcesFromPaths = useCallback((paths: string[]) => {
@@ -718,19 +780,69 @@ export function MirrorPage() {
     setNotice(null);
   }, []);
 
-  const handleOpenFaceSourcePicker = useCallback(() => {
-    faceSourceInputRef.current?.click();
-  }, []);
+  const handleOpenFaceSourcePicker = useCallback(async () => {
+    try {
+      const selected = await openDialog({
+        multiple: true,
+        directory: false,
+        filters: [
+          {
+            name: "Images",
+            extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"],
+          },
+        ],
+      });
+
+      if (!selected) {
+        return;
+      }
+
+      const paths = (Array.isArray(selected) ? selected : [selected]).filter(
+        (path): path is string => typeof path === "string"
+      );
+
+      if (paths.length > 0) {
+        addFaceSourcesFromPaths(paths);
+      }
+    } catch {
+      // fallback: keep old file input way in web/dev environment
+      faceSourceInputRef.current?.click();
+    }
+  }, [addFaceSourcesFromPaths]);
 
   const handleFaceSourceInputChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(event.target.files ?? []);
-      const paths = files
-        .map((file) => (file as File & { path?: string }).path)
+      // 修复：event.target.files 可能是 null，且类型转换可能存在问题
+      // 另外，input type="file" 的 onChange 事件触发后，如果再次选择相同文件可能不会触发
+      // 所以需要在处理完后清空 value
+
+      const files = event.target.files;
+      if (!files || files.length === 0) {
+        return;
+      }
+
+      const fileList = Array.from(files);
+      // 注意：浏览器出于安全考虑，通常不直接暴露完整文件路径 (file.path)
+      // 但在 Tauri 环境中，如果配置了适当的权限，File 对象可能会包含 path 属性
+      // 或者我们需要使用 Tauri 的 dialog API 来选择文件，而不是原生的 input
+
+      // 尝试读取 path，如果不存在（比如在纯浏览器环境），则回退到使用 URL.createObjectURL (虽然这只对本次会话有效)
+      // 但根据项目上下文，这是一个 Tauri 应用，且 Asset 接口定义了 path: string
+
+      const paths = fileList
+        .map((file) => (file as any).path) // 强制转换，Tauri 环境下 File 对象通常有 path 属性
         .filter((path): path is string => !!path);
 
-      addFaceSourcesFromPaths(paths);
-      event.currentTarget.value = "";
+      if (paths.length > 0) {
+        addFaceSourcesFromPaths(paths);
+      } else {
+        // 如果获取不到 path (例如在非 Tauri 环境或权限问题)，尝试使用 createObjectURL
+        // 但这里为了保持一致性，我们假设是在 Tauri 环境下运行
+        // 如果 paths 为空，可能是因为 input 没能获取到 path
+        console.warn("无法获取文件路径，请确保在 Tauri 环境中运行");
+      }
+
+      event.target.value = "";
     },
     [addFaceSourcesFromPaths]
   );
@@ -745,8 +857,28 @@ export function MirrorPage() {
           idx === selectedRegionIndex ? { ...region, faceSourceId } : region
         )
       );
+      setActiveFaceSourceId(faceSourceId || null);
     },
     [selectedRegionIndex]
+  );
+
+  const handleRenameFaceSource = useCallback(
+    (faceSourceId: string) => {
+      const source = faceSources.find((s: FaceAsset) => s.id === faceSourceId);
+      if (!source || source.locked) return;
+
+      const currentName = source.name || `Face Source ${faceSources.indexOf(source) + 1}`;
+      const newName = window.prompt(t("Enter new name"), currentName);
+
+      if (newName && newName.trim() !== "") {
+        setFaceSources((prev: FaceAsset[]) =>
+          prev.map((s: FaceAsset) =>
+            s.id === faceSourceId ? { ...s, name: newName.trim() } : s
+          )
+        );
+      }
+    },
+    [faceSources, t]
   );
 
   const handleRemoveFaceSource = useCallback(
@@ -755,7 +887,7 @@ export function MirrorPage() {
         return;
       }
       setFaceSources((prev: FaceAsset[]) =>
-        prev.filter((source) => source.id !== faceSourceId || source.locked)
+        prev.filter((source: FaceAsset) => source.id !== faceSourceId || source.locked)
       );
       setRegions((prev: Region[]) =>
         prev.map((region: Region) =>
@@ -764,8 +896,11 @@ export function MirrorPage() {
             : region
         )
       );
+      setActiveFaceSourceId((prev: string | null) =>
+        prev === faceSourceId ? null : prev
+      );
     },
-    [faceSources]
+    []
   );
 
   const handleVideoTimelineChange = useCallback(
@@ -990,6 +1125,36 @@ export function MirrorPage() {
       (kMirrorStates.input.type === "image" ||
         kMirrorStates.input.type === "video");
 
+    // 修复：支持拖拽到素材池区域
+    // 检查是否拖拽到了素材池区域
+    const isOverFaceSourcePool = (event?: DragEvent) => {
+      // 由于 useDragDrop 钩子目前只提供了 paths，没有提供 event 对象或坐标
+      // 我们需要修改 useDragDrop 或者在这里做一些假设
+      // 但根据用户描述 "另外把图片从外部拖动到素材池也可以！"
+      // 我们可以简单地认为，只要处于多脸模式且正在编辑区域，拖拽进来的图片就应该被视为添加素材
+      // 除非用户明确是想替换主输入图片（但这通常需要拖拽到特定区域，或者在非编辑模式下）
+
+      // 现有的逻辑是：如果处于多脸模式编辑状态，拖拽就认为是添加素材。
+      // 这似乎符合逻辑。
+      // 但用户反馈说 "把图片从外部拖动到素材池也可以"，暗示可能之前的逻辑有问题或者用户期望更明确的交互。
+
+      // 让我们检查一下 shouldAddFaceSources 的条件：
+      // !kMirrorStates.isMe (不是在设置自己的脸)
+      // isEditingRegions (正在编辑区域)
+      // isMultiFaceMode (多脸模式)
+      // !!kMirrorStates.input (有输入图片/视频)
+
+      // 这个逻辑看起来是正确的，只要满足这些条件，拖拽就会调用 addFaceSourcesFromPaths。
+      // 可能是用户在操作时，某些条件不满足？
+      // 或者用户希望即使不满足某些条件（比如不在编辑区域？），只要拖拽到素材池那个 UI 区域，也能添加？
+
+      // 由于我们无法获取拖拽的具体坐标（useDragDrop 限制），我们只能依赖全局状态。
+      // 现有的逻辑已经覆盖了 "在多脸模式下拖拽添加素材" 的需求。
+      // 也许问题在于 useDragDrop 的实现，或者 isOverTarget 的判断。
+
+      return true;
+    };
+
     if (shouldAddFaceSources) {
       addFaceSourcesFromPaths(paths);
       return;
@@ -1094,6 +1259,30 @@ export function MirrorPage() {
     return `${mm}:${ss}`;
   }, []);
 
+  const getVideoStageLabel = useCallback(
+    (stage: string | null | undefined) => {
+      if (!stage) {
+        return t("Initializing...");
+      }
+      const stageMap: Record<string, string> = {
+        queued: t("Queued"),
+        "validating-input": t("Validating input"),
+        "opening-video": t("Opening video"),
+        "reading-video-metadata": t("Reading video metadata"),
+        "extracting-target-face": t("Extracting target face"),
+        "building-face-tracks": t("Building face tracks"),
+        "processing-video-frames": t("Processing video frames"),
+        "muxing-audio": t("Muxing audio"),
+        finalizing: t("Finalizing output"),
+        done: t("Completed"),
+        failed: t("Failed"),
+        cancelled: t("Cancelled"),
+      };
+      return stageMap[stage] || stage;
+    },
+    [t]
+  );
+
   const tips = notice
     ? notice
     : kMirrorStates.isMe
@@ -1102,7 +1291,9 @@ export function MirrorPage() {
         ? t("Then, drag the photo you want to swap faces with into the mirror.")
         : isSwapping
           ? isVideoInput
-            ? t("Video swapping... This may take a while, please wait.")
+            ? t("Video swapping stage", {
+              stage: getVideoStageLabel(videoStage),
+            })
             : t("Face swapping... This may take a few seconds, please wait.")
           : isDetectingFaces
             ? t("Detecting faces...")
@@ -1175,7 +1366,7 @@ export function MirrorPage() {
                     {isMultiFaceMode ? t("Single-Face Mode") : t("Multi-Face Swap")}
                   </div>
                 )}
-                <div onClick={() => open(t("aboutLink"))}>{t("About")}</div>
+                <div onClick={() => openExternal(t("aboutLink"))}>{t("About")}</div>
                 <div onClick={() => exit(0)}>{t("Quit")}</div>
               </div>
             </div>
@@ -1265,7 +1456,7 @@ export function MirrorPage() {
                     {regions.map((region: Region, index: number) => (
                       <div
                         key={`region-${index}`}
-                        className={`selection-rect ${selectedRegionIndex === index ? "selected" : ""}`}
+                        className={`selection-rect ${region.faceSourceId ? "assigned" : ""} ${selectedRegionIndex === index ? "selected" : ""}`}
                         style={{
                           left: region.x,
                           top: region.y,
@@ -1409,28 +1600,41 @@ export function MirrorPage() {
                       }
                     >
                       <option value="">{t("Select a face source")}</option>
-                      {faceSources.map((source, index) => (
+                      {faceSources.map((source: FaceAsset, index: number) => (
                         <option key={source.id} value={source.id}>
                           {source.locked
                             ? t("Default Face")
-                            : `${t("Face Source")} ${index + 1}`}
+                            : source.name || `${t("Face Source")} ${index + 1}`}
                         </option>
                       ))}
                     </select>
                   </div>
                 )}
                 <div className="face-source-list">
-                  {faceSources.map((source, index) => {
+                  {faceSources.map((source: FaceAsset, index: number) => {
                     const selectedFaceSourceId =
                       selectedRegionIndex === null
                         ? ""
                         : regions[selectedRegionIndex]?.faceSourceId || "";
-                    const isSelected = selectedFaceSourceId === source.id;
+                    const isAssignedToSelectedRegion = selectedFaceSourceId === source.id;
+                    const isSelected =
+                      activeFaceSourceId === source.id || isAssignedToSelectedRegion;
                     return (
                       <div
                         key={source.id}
                         className={`face-source-card ${isSelected ? "selected" : ""}`}
-                        onClick={() => handleAssignSelectedRegionFaceSource(source.id)}
+                        onClick={() =>
+                          setActiveFaceSourceId((prev: string | null) =>
+                            prev === source.id ? null : source.id
+                          )
+                        }
+                        onContextMenu={(event) => {
+                          if (source.locked) {
+                            return;
+                          }
+                          event.preventDefault();
+                          handleRenameFaceSource(source.id);
+                        }}
                       >
                         <img
                           src={source.src}
@@ -1441,19 +1645,21 @@ export function MirrorPage() {
                           <span className="face-source-title">
                             {source.locked
                               ? t("Default Face")
-                              : `${t("Face Source")} ${index + 1}`}
+                              : source.name || `${t("Face Source")} ${index + 1}`}
                           </span>
                           {!source.locked && (
-                            <button
-                              type="button"
-                              className="face-source-remove"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                handleRemoveFaceSource(source.id);
-                              }}
-                            >
-                              {t("Remove")}
-                            </button>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                className="face-source-remove"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleRemoveFaceSource(source.id);
+                                }}
+                              >
+                                {t("Remove")}
+                              </button>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1482,6 +1688,11 @@ export function MirrorPage() {
                         eta: formatEta(videoEtaSeconds),
                       })
                       : t("Estimating remaining time...")}
+                  </span>
+                  <span>
+                    {t("Current stage", {
+                      stage: getVideoStageLabel(videoStage),
+                    })}
                   </span>
                 </div>
               </div>

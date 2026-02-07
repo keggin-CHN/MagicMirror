@@ -54,7 +54,7 @@ def _get_video_task_progress(task_id: str):
     with VIDEO_TASK_PROGRESS_LOCK:
         state = VIDEO_TASK_PROGRESS.get(task_id)
         if not state:
-            return {"status": "idle", "progress": 0, "etaSeconds": None}
+            return {"status": "idle", "progress": 0, "etaSeconds": None, "stage": None}
         return state.copy()
 
 
@@ -419,6 +419,7 @@ def create_video_task():
                 regions,
                 key_frame_ms=key_frame_ms,
                 progress_callback=_on_progress,
+                stage_callback=_on_stage,
             )
         else:
             if not target_face:
@@ -439,6 +440,7 @@ def create_video_task():
                 input_video,
                 target_face,
                 progress_callback=_on_progress,
+                stage_callback=_on_stage,
             )
 
         _set_video_task_progress(
@@ -448,7 +450,16 @@ def create_video_task():
             etaSeconds=None,
             error=None,
             result=None,
+            stage="queued",
         )
+
+        def _on_stage(stage: str):
+            _set_video_task_progress(
+                task_id,
+                status="running",
+                stage=stage,
+                error=None,
+            )
 
         def _on_progress(frame_count: int, total_frames: int, elapsed_seconds: float):
             progress = 0.0
@@ -478,6 +489,7 @@ def create_video_task():
                 etaSeconds=0,
                 error=None,
                 result=res,
+                stage="done",
             )
             return {"result": res}
 
@@ -487,6 +499,7 @@ def create_video_task():
             status="failed",
             error=final_error,
             etaSeconds=None,
+            stage="failed",
         )
         response.status = 500
         return {"error": final_error}
@@ -499,6 +512,7 @@ def create_video_task():
                 status="failed",
                 error=_simplify_task_error(e),
                 etaSeconds=None,
+                stage="failed",
             )
         response.status = 500
         return {"error": _simplify_task_error(e)}
@@ -517,5 +531,6 @@ def cancel_task(task_id):
         status="cancelled",
         etaSeconds=None,
         error="cancelled",
+        stage="cancelled",
     )
     return {"success": True}
