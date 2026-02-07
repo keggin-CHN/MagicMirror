@@ -104,8 +104,17 @@ jobs:
             }
           }
 
+          # Ensure onnxruntime provider DLLs are bundled (Nuitka may miss them depending on wheel layout).
+          $dstCapi = Join-Path $dist "onnxruntime/capi"
+          New-Item -ItemType Directory -Force -Path $dstCapi | Out-Null
+          $ortBase = python -c "import onnxruntime, pathlib; print(pathlib.Path(onnxruntime.__file__).resolve().parent)"
+          $providerDlls = Get-ChildItem -Path $ortBase -Recurse -Filter "onnxruntime_providers_*.dll" -ErrorAction SilentlyContinue
+          foreach ($dll in $providerDlls) {
+            Copy-Item -Force $dll.FullName $dstCapi
+          }
+
           # Fail fast if onnxruntime provider DLLs are missing (this would cause ImportError in onnxruntime.capi._pybind_state).
-          $providers = Get-ChildItem -Path (Join-Path $dist "onnxruntime/capi") -Filter "onnxruntime_providers_*.dll" -ErrorAction SilentlyContinue
+          $providers = Get-ChildItem -Path $dstCapi -Filter "onnxruntime_providers_*.dll" -ErrorAction SilentlyContinue
           if (!$providers -or $providers.Count -lt 2) {
             Write-Host "Found provider DLLs:" ($providers | ForEach-Object Name)
             throw "onnxruntime provider DLLs missing from dist"
