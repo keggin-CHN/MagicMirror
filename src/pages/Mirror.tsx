@@ -384,30 +384,30 @@ export function MirrorPage() {
     video.pause();
   }, [isVideoInput, showSelection, videoKeyFrameMs, kMirrorStates.input?.path]);
 
-  const remapRegionsForZoom = useCallback(
-    (currentRegions: Region[], oldZoom: number, newZoom: number) => {
-      if (!previewRef.current) return currentRegions;
-      const rect = previewRef.current.getBoundingClientRect();
-      const cx = rect.width / 2;
-      const cy = rect.height / 2;
-      const factor = newZoom / oldZoom;
+  // const remapRegionsForZoom = useCallback(
+  //   (currentRegions: Region[], oldZoom: number, newZoom: number) => {
+  //     if (!previewRef.current) return currentRegions;
+  //     const rect = previewRef.current.getBoundingClientRect();
+  //     const cx = rect.width / 2;
+  //     const cy = rect.height / 2;
+  //     const factor = newZoom / oldZoom;
 
-      return currentRegions.map((r) => {
-        const x = cx + (r.x - cx) * factor;
-        const y = cy + (r.y - cy) * factor;
-        const width = r.width * factor;
-        const height = r.height * factor;
-        return {
-          ...r,
-          x,
-          y,
-          width,
-          height,
-        };
-      });
-    },
-    []
-  );
+  //     return currentRegions.map((r) => {
+  //       const x = cx + (r.x - cx) * factor;
+  //       const y = cy + (r.y - cy) * factor;
+  //       const width = r.width * factor;
+  //       const height = r.height * factor;
+  //       return {
+  //         ...r,
+  //         x,
+  //         y,
+  //         width,
+  //         height,
+  //       };
+  //     });
+  //   },
+  //   []
+  // );
 
   const handleWheelZoom = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
@@ -1127,33 +1127,33 @@ export function MirrorPage() {
 
     // 修复：支持拖拽到素材池区域
     // 检查是否拖拽到了素材池区域
-    const isOverFaceSourcePool = (event?: DragEvent) => {
-      // 由于 useDragDrop 钩子目前只提供了 paths，没有提供 event 对象或坐标
-      // 我们需要修改 useDragDrop 或者在这里做一些假设
-      // 但根据用户描述 "另外把图片从外部拖动到素材池也可以！"
-      // 我们可以简单地认为，只要处于多脸模式且正在编辑区域，拖拽进来的图片就应该被视为添加素材
-      // 除非用户明确是想替换主输入图片（但这通常需要拖拽到特定区域，或者在非编辑模式下）
+    // const isOverFaceSourcePool = (event?: DragEvent) => {
+    //   // 由于 useDragDrop 钩子目前只提供了 paths，没有提供 event 对象或坐标
+    //   // 我们需要修改 useDragDrop 或者在这里做一些假设
+    //   // 但根据用户描述 "另外把图片从外部拖动到素材池也可以！"
+    //   // 我们可以简单地认为，只要处于多脸模式且正在编辑区域，拖拽进来的图片就应该被视为添加素材
+    //   // 除非用户明确是想替换主输入图片（但这通常需要拖拽到特定区域，或者在非编辑模式下）
 
-      // 现有的逻辑是：如果处于多脸模式编辑状态，拖拽就认为是添加素材。
-      // 这似乎符合逻辑。
-      // 但用户反馈说 "把图片从外部拖动到素材池也可以"，暗示可能之前的逻辑有问题或者用户期望更明确的交互。
+    //   // 现有的逻辑是：如果处于多脸模式编辑状态，拖拽就认为是添加素材。
+    //   // 这似乎符合逻辑。
+    //   // 但用户反馈说 "把图片从外部拖动到素材池也可以"，暗示可能之前的逻辑有问题或者用户期望更明确的交互。
 
-      // 让我们检查一下 shouldAddFaceSources 的条件：
-      // !kMirrorStates.isMe (不是在设置自己的脸)
-      // isEditingRegions (正在编辑区域)
-      // isMultiFaceMode (多脸模式)
-      // !!kMirrorStates.input (有输入图片/视频)
+    //   // 让我们检查一下 shouldAddFaceSources 的条件：
+    //   // !kMirrorStates.isMe (不是在设置自己的脸)
+    //   // isEditingRegions (正在编辑区域)
+    //   // isMultiFaceMode (多脸模式)
+    //   // !!kMirrorStates.input (有输入图片/视频)
 
-      // 这个逻辑看起来是正确的，只要满足这些条件，拖拽就会调用 addFaceSourcesFromPaths。
-      // 可能是用户在操作时，某些条件不满足？
-      // 或者用户希望即使不满足某些条件（比如不在编辑区域？），只要拖拽到素材池那个 UI 区域，也能添加？
+    //   // 这个逻辑看起来是正确的，只要满足这些条件，拖拽就会调用 addFaceSourcesFromPaths。
+    //   // 可能是用户在操作时，某些条件不满足？
+    //   // 或者用户希望即使不满足某些条件（比如不在编辑区域？），只要拖拽到素材池那个 UI 区域，也能添加？
 
-      // 由于我们无法获取拖拽的具体坐标（useDragDrop 限制），我们只能依赖全局状态。
-      // 现有的逻辑已经覆盖了 "在多脸模式下拖拽添加素材" 的需求。
-      // 也许问题在于 useDragDrop 的实现，或者 isOverTarget 的判断。
+    //   // 由于我们无法获取拖拽的具体坐标（useDragDrop 限制），我们只能依赖全局状态。
+    //   // 现有的逻辑已经覆盖了 "在多脸模式下拖拽添加素材" 的需求。
+    //   // 也许问题在于 useDragDrop 的实现，或者 isOverTarget 的判断。
 
-      return true;
-    };
+    //   return true;
+    // };
 
     if (shouldAddFaceSources) {
       addFaceSourcesFromPaths(paths);
