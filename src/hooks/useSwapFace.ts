@@ -14,6 +14,11 @@ export function useSwapFace() {
   const [isSwapping, setIsSwapping] = useXState("isSwapping", false);
   const [output, setOutput] = useXState<string | null>("swapOutput", null);
   const [error, setError] = useXState<string | null>("swapError", null);
+  const [videoProgress, setVideoProgress] = useXState("videoSwapProgress", 0);
+  const [videoEtaSeconds, setVideoEtaSeconds] = useXState<number | null>(
+    "videoSwapEtaSeconds",
+    null
+  );
   const runTask = useCallback(
     async (create: (taskId: string) => Promise<TaskResult>) => {
       await kSwapFaceRefs.cancel?.();
@@ -39,6 +44,8 @@ export function useSwapFace() {
 
   const swapFace = useCallback(
     async (inputImage: string, targetFace: string, regions?: Region[]) => {
+      setVideoProgress(0);
+      setVideoEtaSeconds(null);
       return runTask((taskId: string) =>
         Server.createTask({
           id: taskId,
@@ -48,20 +55,75 @@ export function useSwapFace() {
         })
       );
     },
-    [runTask]
+    [runTask, setVideoEtaSeconds, setVideoProgress]
   );
 
   const swapVideo = useCallback(
     async (inputVideo: string, targetFace: string) => {
-      return runTask((taskId: string) =>
-        Server.createVideoTask({
-          id: taskId,
-          inputVideo,
-          targetFace,
-        })
-      );
+      await kSwapFaceRefs.cancel?.();
+
+      setIsSwapping(true);
+      setError(null);
+      setVideoProgress(0);
+      setVideoEtaSeconds(null);
+
+      const taskId = (kSwapFaceRefs.id++).toString();
+      let polling = true;
+
+      const pollProgress = async () => {
+        while (polling) {
+          const state = await Server.getVideoTaskProgress(taskId);
+          if (state.status === "running" || state.status === "success") {
+            setVideoProgress(state.progress ?? 0);
+            setVideoEtaSeconds(state.etaSeconds ?? null);
+          } else if (state.status === "failed") {
+            setVideoEtaSeconds(null);
+          }
+          if (!polling) {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+      };
+
+      const pollPromise = pollProgress();
+
+      kSwapFaceRefs.cancel = async () => {
+        polling = false;
+        const success = await Server.cancelTask(taskId);
+        if (success) {
+          setIsSwapping(false);
+          setVideoEtaSeconds(null);
+        }
+      };
+
+      const { result, error } = await Server.createVideoTask({
+        id: taskId,
+        inputVideo,
+        targetFace,
+      });
+
+      polling = false;
+      await pollPromise;
+
+      kSwapFaceRefs.cancel = undefined;
+      const finalError = result ? null : error ?? "unknown";
+      setError(finalError);
+      setOutput(result);
+      if (result) {
+        setVideoProgress(100);
+        setVideoEtaSeconds(0);
+      }
+      setIsSwapping(false);
+      return result;
     },
-    [runTask]
+    [
+      setError,
+      setIsSwapping,
+      setOutput,
+      setVideoEtaSeconds,
+      setVideoProgress,
+    ]
   );
 
   useEffect(() => {
@@ -74,6 +136,8 @@ export function useSwapFace() {
     isSwapping,
     output,
     error,
+    videoProgress,
+    videoEtaSeconds,
     swapFace,
     swapVideo,
     cancel: () => kSwapFaceRefs.cancel?.(),

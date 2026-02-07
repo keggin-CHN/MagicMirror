@@ -1,3 +1,4 @@
+import { ProgressBar } from "@/components/ProgressBar";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useSwapFace } from "@/hooks/useSwapFace";
 import { type Region } from "@/services/server";
@@ -36,7 +37,14 @@ export function MirrorPage() {
 
   const { i18n, t } = useTranslation();
 
-  const { isSwapping, swapFace, swapVideo, error: swapError } = useSwapFace();
+  const {
+    isSwapping,
+    swapFace,
+    swapVideo,
+    error: swapError,
+    videoProgress,
+    videoEtaSeconds,
+  } = useSwapFace();
   const [success, setSuccess] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const [regions, setRegions] = useState<Region[]>([]);
@@ -56,6 +64,12 @@ export function MirrorPage() {
   const resizeRef = useRef<{
     index: number;
     handle: ResizeHandle;
+    startX: number;
+    startY: number;
+    origin: Region;
+  } | null>(null);
+  const moveRef = useRef<{
+    index: number;
     startX: number;
     startY: number;
     origin: Region;
@@ -85,6 +99,7 @@ export function MirrorPage() {
       selectingRef.current = false;
       startPointRef.current = null;
       resizeRef.current = null;
+      moveRef.current = null;
       inputPathRef.current = null;
       return;
     }
@@ -98,6 +113,7 @@ export function MirrorPage() {
       selectingRef.current = false;
       startPointRef.current = null;
       resizeRef.current = null;
+      moveRef.current = null;
       const img = new Image();
       img.onload = () => {
         setInputSize({ width: img.naturalWidth, height: img.naturalHeight });
@@ -119,6 +135,9 @@ export function MirrorPage() {
   const showSelection =
     isImageInput && isEditingRegions && !kMirrorStates.isMe && !!inputSize;
   const showToolbar = showSelection && !isSwapping;
+  const selectionObjectFit: "contain" | "cover" = showSelection
+    ? "contain"
+    : "cover";
 
   const toImageRegions = useCallback(() => {
     if (!previewRef.current || !inputSize) {
@@ -127,11 +146,11 @@ export function MirrorPage() {
     }
     const rect = previewRef.current.getBoundingClientRect();
 
-    // object-fit: cover 的缩放计算
-    const scale = Math.max(
-      rect.width / inputSize.width,
-      rect.height / inputSize.height
-    );
+    // object-fit 的缩放计算（选区编辑态使用 contain，保证整图可见）
+    const scale =
+      selectionObjectFit === "cover"
+        ? Math.max(rect.width / inputSize.width, rect.height / inputSize.height)
+        : Math.min(rect.width / inputSize.width, rect.height / inputSize.height);
     const displayWidth = inputSize.width * scale;
     const displayHeight = inputSize.height * scale;
     const offsetX = (rect.width - displayWidth) / 2;
@@ -174,7 +193,7 @@ export function MirrorPage() {
 
     console.log("[DEBUG] toImageRegions 最终结果:", imageRegions);
     return imageRegions;
-  }, [regions, inputSize]);
+  }, [regions, inputSize, selectionObjectFit]);
 
   const handlePointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -186,6 +205,7 @@ export function MirrorPage() {
       const startY = clamp(event.clientY - rect.top, 0, rect.height);
       previewRef.current.setPointerCapture(event.pointerId);
       resizeRef.current = null;
+      moveRef.current = null;
       setSelectedRegionIndex(null);
       selectingRef.current = true;
       startPointRef.current = { x: startX, y: startY };
@@ -254,6 +274,27 @@ export function MirrorPage() {
         return;
       }
 
+      if (moveRef.current) {
+        const { index, startX, startY, origin } = moveRef.current;
+        const dx = currentX - startX;
+        const dy = currentY - startY;
+        const newX = clamp(origin.x + dx, 0, rect.width - origin.width);
+        const newY = clamp(origin.y + dy, 0, rect.height - origin.height);
+
+        setRegions((prev: Region[]) =>
+          prev.map((region, idx) =>
+            idx === index
+              ? {
+                ...region,
+                x: newX,
+                y: newY,
+              }
+              : region
+          )
+        );
+        return;
+      }
+
       if (!selectingRef.current || !startPointRef.current) {
         return;
       }
@@ -280,6 +321,10 @@ export function MirrorPage() {
         resizeRef.current = null;
         return;
       }
+      if (moveRef.current) {
+        moveRef.current = null;
+        return;
+      }
       if (!selectingRef.current) {
         return;
       }
@@ -290,16 +335,34 @@ export function MirrorPage() {
       }
       setDraftRegion(null);
       startPointRef.current = null;
+      moveRef.current = null;
     },
     [draftRegion, regions.length]
   );
 
   const handleSelectRegion = useCallback(
     (index: number) => (event: PointerEvent<HTMLDivElement>) => {
+      if (!canSelect || !previewRef.current) {
+        return;
+      }
       event.stopPropagation();
+      const rect = previewRef.current.getBoundingClientRect();
+      const startX = clamp(event.clientX - rect.left, 0, rect.width);
+      const startY = clamp(event.clientY - rect.top, 0, rect.height);
+      previewRef.current.setPointerCapture(event.pointerId);
+      selectingRef.current = false;
+      startPointRef.current = null;
+      setDraftRegion(null);
+      resizeRef.current = null;
+      moveRef.current = {
+        index,
+        startX,
+        startY,
+        origin: regions[index],
+      };
       setSelectedRegionIndex(index);
     },
-    []
+    [canSelect, clamp, regions]
   );
 
   const handleResizePointerDown = useCallback(
@@ -313,6 +376,7 @@ export function MirrorPage() {
         const startX = clamp(event.clientX - rect.left, 0, rect.width);
         const startY = clamp(event.clientY - rect.top, 0, rect.height);
         previewRef.current.setPointerCapture(event.pointerId);
+        moveRef.current = null;
         resizeRef.current = {
           index,
           handle,
@@ -343,6 +407,7 @@ export function MirrorPage() {
     selectingRef.current = false;
     startPointRef.current = null;
     resizeRef.current = null;
+    moveRef.current = null;
   }, []);
 
   const handleEditRegions = useCallback(() => {
@@ -383,6 +448,7 @@ export function MirrorPage() {
     selectingRef.current = false;
     startPointRef.current = null;
     resizeRef.current = null;
+    moveRef.current = null;
     const result = await swapFace(
       kMirrorStates.input.path,
       kMirrorStates.me.path,
@@ -391,7 +457,7 @@ export function MirrorPage() {
     setSuccess(result != null);
     if (result) {
       kMirrorStates.result = {
-        src: convertFileSrc(result),
+        src: `${convertFileSrc(result)}?t=${Date.now()}`,
         path: result,
         type: "image",
       };
@@ -457,7 +523,7 @@ export function MirrorPage() {
         setSuccess(result != null);
         if (result) {
           kMirrorStates.result = {
-            src: convertFileSrc(result),
+            src: `${convertFileSrc(result)}?t=${Date.now()}`,
             path: result,
             type: "video",
           };
@@ -503,6 +569,18 @@ export function MirrorPage() {
   };
 
   const swapErrorMessage = getSwapErrorMessage(swapError);
+
+  const formatEta = useCallback((seconds: number | null | undefined) => {
+    if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) {
+      return "--:--";
+    }
+    const safeSeconds = Math.max(0, Math.floor(seconds));
+    const mm = Math.floor(safeSeconds / 60)
+      .toString()
+      .padStart(2, "0");
+    const ss = (safeSeconds % 60).toString().padStart(2, "0");
+    return `${mm}:${ss}`;
+  }, []);
 
   const tips = notice
     ? notice
@@ -607,6 +685,7 @@ export function MirrorPage() {
                   <video
                     src={previewSrc}
                     className="preview-media"
+                    style={{ objectFit: selectionObjectFit }}
                     autoPlay
                     loop
                     muted
@@ -616,6 +695,7 @@ export function MirrorPage() {
                   <img
                     src={previewSrc}
                     className="preview-media"
+                    style={{ objectFit: selectionObjectFit }}
                     draggable={false}
                   />
                 )}
@@ -710,9 +790,28 @@ export function MirrorPage() {
                 </div>
               </div>
             )}
+            {isVideoInput && isSwapping && (
+              <div className="video-progress-panel">
+                <ProgressBar progress={videoProgress} width="360px" height="6px" />
+                <div className="video-progress-meta">
+                  <span>
+                    {t("Video processing progress", {
+                      progress: videoProgress.toFixed(1),
+                    })}
+                  </span>
+                  <span>
+                    {videoEtaSeconds !== null
+                      ? t("Estimated remaining time", {
+                        eta: formatEta(videoEtaSeconds),
+                      })
+                      : t("Estimating remaining time...")}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
-    </div>
+    </div >
   );
 }

@@ -31,6 +31,13 @@ export interface TaskResult {
   error?: string;
 }
 
+export interface VideoTaskProgress {
+  status: "idle" | "running" | "success" | "failed" | "cancelled";
+  progress: number;
+  etaSeconds?: number | null;
+  error?: string | null;
+}
+
 class _Server {
   _childProcess?: Child;
   _baseURL = "http://localhost:8023";
@@ -80,11 +87,25 @@ class _Server {
       return true;
     }
     try {
+      if (type() === "windows") {
+        try {
+          await invoke<string[]>("repair_server_runtime", {
+            targetDir: await this.rootDir(),
+          });
+        } catch (error) {
+          console.warn("[Server] Windows runtime 修复失败，继续尝试启动:", error);
+        }
+      }
+
       const command = Command.create(`server-${type()}`);
-      command.addListener("close", () => onStop?.());
+      command.addListener("close", () => {
+        this._childProcess = undefined;
+        onStop?.();
+      });
       this._childProcess = await command.spawn();
       return true;
     } catch {
+      this._childProcess = undefined;
       return false;
     }
   }
@@ -93,8 +114,10 @@ class _Server {
     if (!this._childProcess) {
       return true;
     }
+    const childProcess = this._childProcess;
+    this._childProcess = undefined;
     try {
-      await this._childProcess.kill();
+      await childProcess.kill();
       return true;
     } catch {
       return false;
@@ -219,6 +242,32 @@ class _Server {
     } catch (error) {
       console.error("[Server] 视频换脸请求异常:", error);
       return { result: null, error: "network" };
+    }
+  }
+
+  async getVideoTaskProgress(taskId: string): Promise<VideoTaskProgress> {
+    try {
+      const res = await fetch(
+        `${this._baseURL}/task/video/progress/${encodeURIComponent(taskId)}`,
+        {
+          method: "get",
+        }
+      );
+      if (!res.ok) {
+        return { status: "idle", progress: 0, etaSeconds: null };
+      }
+      const data = await res.json();
+      return {
+        status: data.status ?? "idle",
+        progress: Number.isFinite(data.progress) ? Number(data.progress) : 0,
+        etaSeconds:
+          data.etaSeconds === null || data.etaSeconds === undefined
+            ? null
+            : Number(data.etaSeconds),
+        error: data.error ?? null,
+      };
+    } catch {
+      return { status: "idle", progress: 0, etaSeconds: null };
     }
   }
 

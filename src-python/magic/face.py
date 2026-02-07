@@ -4,6 +4,7 @@ import subprocess
 import threading
 import traceback
 from functools import lru_cache
+import time
 
 import cv2
 import numpy as np
@@ -90,7 +91,9 @@ def swap_face_regions(input_path, face_path, regions):
             swapped_count += 1
 
         if swapped_count == 0:
-            raise RuntimeError("no-face-in-selected-regions")
+            # 用户明确选择了区域，但该区域可能暂时无人脸：
+            # 按产品诉求仍需输出文件（保持原图内容），而不是报错中断。
+            return _write_image(save_path, output_img)
 
         return _write_image(save_path, output_img)
 
@@ -99,7 +102,7 @@ def swap_face_regions(input_path, face_path, regions):
         raise
 
 
-def swap_face_video(input_path, face_path):
+def swap_face_video(input_path, face_path, progress_callback=None):
     try:
         print(f"[INFO] 开始视频换脸: input={input_path}, face={face_path}")
 
@@ -112,7 +115,9 @@ def swap_face_video(input_path, face_path):
         save_path = _get_output_video_path(input_path)
         print(f"[INFO] 输出路径: {save_path}")
 
-        output_path = _swap_face_video(input_path, face_path, save_path)
+        output_path = _swap_face_video(
+            input_path, face_path, save_path, progress_callback=progress_callback
+        )
 
         if not output_path or not os.path.exists(output_path):
             raise RuntimeError("video-output-missing")
@@ -131,7 +136,7 @@ def swap_face_video(input_path, face_path):
         raise
 
 
-def _swap_face_video(input_path, face_path, save_path):
+def _swap_face_video(input_path, face_path, save_path, progress_callback=None):
     cap = None
     writer = None
 
@@ -184,6 +189,7 @@ def _swap_face_video(input_path, face_path, save_path):
         frame_count = 0
         processed_count = 0
         failed_count = 0
+        start_time = time.time()
 
         while True:
             ok, frame = cap.read()
@@ -191,6 +197,16 @@ def _swap_face_video(input_path, face_path, save_path):
                 break
 
             frame_count += 1
+            if progress_callback and frame_count % 5 == 0:
+                try:
+                    progress_callback(
+                        frame_count=frame_count,
+                        total_frames=total_frames,
+                        elapsed_seconds=max(0.0, time.time() - start_time),
+                    )
+                except Exception as e:
+                    print(f"[WARN] progress_callback failed: {str(e)}")
+
             if frame_count % 30 == 0:  # 每30帧打印一次进度
                 progress = (frame_count / total_frames * 100) if total_frames > 0 else 0
                 print(
@@ -240,6 +256,16 @@ def _swap_face_video(input_path, face_path, save_path):
         print(f"  - 总帧数: {frame_count}")
         print(f"  - 成功换脸: {processed_count}")
         print(f"  - 跳过/失败: {failed_count}")
+
+        if progress_callback:
+            try:
+                progress_callback(
+                    frame_count=total_frames if total_frames > 0 else frame_count,
+                    total_frames=total_frames if total_frames > 0 else frame_count,
+                    elapsed_seconds=max(0.0, time.time() - start_time),
+                )
+            except Exception as e:
+                print(f"[WARN] progress_callback(final) failed: {str(e)}")
 
         return save_path
 

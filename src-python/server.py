@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import traceback
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 
 def _boot_log_path() -> str:
@@ -28,6 +30,10 @@ def _append_boot_log(text: str) -> None:
         pass
 
 
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
+
 if __name__ == "__main__":
     _append_boot_log("=== boot ===")
     _append_boot_log(f"exe={sys.executable}")
@@ -38,10 +44,18 @@ if __name__ == "__main__":
         from magic.app import app
 
         _append_boot_log("import magic.app: OK")
-        _append_boot_log("starting bottle server on 0.0.0.0:8023")
-        app.run(host="0.0.0.0", port=8023)
+        _append_boot_log("starting threaded wsgi server on 0.0.0.0:8023")
+        httpd = make_server(
+            "0.0.0.0",
+            8023,
+            app,
+            server_class=_ThreadingWSGIServer,
+            handler_class=WSGIRequestHandler,
+        )
+        httpd.serve_forever()
     except Exception as e:
         _append_boot_log("boot failed:")
+        _append_boot_log(f"error={e!r}")
         _append_boot_log(
             "".join(traceback.format_exception(type(e), e, e.__traceback__))
         )

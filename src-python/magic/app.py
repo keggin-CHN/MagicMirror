@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import traceback
 
 from async_tasks import AsyncTask
@@ -27,6 +28,25 @@ ALLOWED_VIDEO_EXTS = {
     ".webm",
     ".m4v",
 }
+
+
+VIDEO_TASK_PROGRESS = {}
+VIDEO_TASK_PROGRESS_LOCK = threading.RLock()
+
+
+def _set_video_task_progress(task_id: str, **updates):
+    with VIDEO_TASK_PROGRESS_LOCK:
+        state = VIDEO_TASK_PROGRESS.get(task_id, {})
+        state.update(updates)
+        VIDEO_TASK_PROGRESS[task_id] = state
+
+
+def _get_video_task_progress(task_id: str):
+    with VIDEO_TASK_PROGRESS_LOCK:
+        state = VIDEO_TASK_PROGRESS.get(task_id)
+        if not state:
+            return {"status": "idle", "progress": 0, "etaSeconds": None}
+        return state.copy()
 
 
 def _ext(path: str) -> str:
@@ -159,6 +179,7 @@ def create_video_task():
     if request.method == "OPTIONS":
         return {}
 
+    task_id = None
     try:
         body = request.json or {}
         task_id = body.get("id")
@@ -189,25 +210,86 @@ def create_video_task():
             response.status = 400
             return {"error": _simplify_task_error(e)}
 
+        _set_video_task_progress(
+            task_id,
+            status="running",
+            progress=0,
+            etaSeconds=None,
+            error=None,
+            result=None,
+        )
+
+        def _on_progress(frame_count: int, total_frames: int, elapsed_seconds: float):
+            progress = 0.0
+            eta_seconds = None
+            if total_frames and total_frames > 0:
+                progress = max(0.0, min(100.0, frame_count / total_frames * 100.0))
+                if frame_count > 0:
+                    eta_seconds = max(
+                        0, int((elapsed_seconds / frame_count) * (total_frames - frame_count))
+                    )
+            _set_video_task_progress(
+                task_id,
+                status="running",
+                progress=round(progress, 2),
+                etaSeconds=eta_seconds,
+                error=None,
+            )
+
         res, err = AsyncTask.run(
-            lambda: swap_face_video(input_video, target_face),
+            lambda: swap_face_video(
+                input_video, target_face, progress_callback=_on_progress
+            ),
             task_id=task_id,
         )
 
         if res:
             print(f"[API] 视频换脸任务完成: {res}")
+            _set_video_task_progress(
+                task_id,
+                status="success",
+                progress=100,
+                etaSeconds=0,
+                error=None,
+                result=res,
+            )
             return {"result": res}
 
+        final_error = _simplify_task_error(err)
+        _set_video_task_progress(
+            task_id,
+            status="failed",
+            error=final_error,
+            etaSeconds=None,
+        )
         response.status = 500
-        return {"error": _simplify_task_error(err)}
+        return {"error": final_error}
 
     except Exception as e:
         print("[ERROR] create_video_task failed:", str(e), "\n", traceback.format_exc())
+        if task_id:
+            _set_video_task_progress(
+                task_id,
+                status="failed",
+                error=_simplify_task_error(e),
+                etaSeconds=None,
+            )
         response.status = 500
         return {"error": _simplify_task_error(e)}
+
+
+@app.get("/task/video/progress/<task_id>")
+def get_video_task_progress(task_id):
+    return _get_video_task_progress(task_id)
 
 
 @app.delete("/task/<task_id>")
 def cancel_task(task_id):
     AsyncTask.cancel(task_id)
+    _set_video_task_progress(
+        task_id,
+        status="cancelled",
+        etaSeconds=None,
+        error="cancelled",
+    )
     return {"success": True}
