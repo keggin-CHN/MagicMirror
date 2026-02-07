@@ -142,6 +142,40 @@ jobs:
 
           Write-Host "Bundled provider DLLs:" ($dstProviderNames -join ", ")
 
+          # Add launcher script for end users: repair runtime DLLs then start server in background.
+          $launcherPath = Join-Path $dist "start_server.bat"
+          $launcherLines = @(
+            '@echo off',
+            'setlocal enableextensions',
+            'cd /d "%~dp0"',
+            '',
+            'taskkill /f /im server.exe >nul 2>&1',
+            '',
+            'for %%F in (',
+            '  vcruntime140.dll',
+            '  vcruntime140_1.dll',
+            '  msvcp140.dll',
+            '  msvcp140_1.dll',
+            '  msvcp140_2.dll',
+            '  msvcp140_atomic_wait.dll',
+            '  concrt140.dll',
+            '  vcomp140.dll',
+            ') do (',
+            '  if exist "%WINDIR%\System32\%%F" (',
+            '    copy /y "%WINDIR%\System32\%%F" "%~dp0%%F" >nul 2>&1',
+            '  )',
+            ')',
+            '',
+            'if not exist "%~dp0server.exe" exit /b 1',
+            'start "" "%~dp0server.exe"',
+            'exit /b 0'
+          )
+          $launcherLines | Set-Content -Path $launcherPath -Encoding ASCII
+
+          if (!(Test-Path $launcherPath)) {
+            throw "launcher script not created: $launcherPath"
+          }
+
           cd out/server.dist
           Compress-Archive -Path * -DestinationPath "../server_${{ matrix.build }}_${{ matrix.arch }}.zip"
           cd ${{ github.workspace }}

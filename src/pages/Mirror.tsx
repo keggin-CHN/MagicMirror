@@ -13,6 +13,7 @@ import {
   useState,
   type ChangeEvent,
   type PointerEvent,
+  type WheelEvent,
 } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -36,6 +37,8 @@ interface FaceAsset extends FaceSource {
 type ResizeHandle = "nw" | "ne" | "sw" | "se";
 
 const kDefaultFaceSourceId = "default-me";
+const kMinSelectionZoom = 0.5;
+const kMaxSelectionZoom = 4;
 
 const kMirrorStates: {
   isMe: boolean;
@@ -96,6 +99,7 @@ export function MirrorPage() {
   const [videoDurationMs, setVideoDurationMs] = useState(0);
   const [videoKeyFrameMs, setVideoKeyFrameMs] = useState(0);
   const [isDetectingFaces, setIsDetectingFaces] = useState(false);
+  const [selectionZoom, setSelectionZoom] = useState(1);
 
   useEffect(() => {
     setTimeout(() => {
@@ -124,6 +128,7 @@ export function MirrorPage() {
       startPointRef.current = null;
       resizeRef.current = null;
       moveRef.current = null;
+      setSelectionZoom(1);
       inputPathRef.current = null;
       autoDetectedImagePathRef.current = null;
       return;
@@ -147,6 +152,7 @@ export function MirrorPage() {
     startPointRef.current = null;
     resizeRef.current = null;
     moveRef.current = null;
+    setSelectionZoom(1);
 
     if (input.type === "image") {
       const img = new Image();
@@ -198,6 +204,13 @@ export function MirrorPage() {
   const selectionObjectFit: "contain" | "cover" = showSelection
     ? "contain"
     : "cover";
+  const selectionPadding = isMultiFaceMode
+    ? isVideoInput
+      ? "56px 56px 300px"
+      : "56px 56px 240px"
+    : isVideoInput
+      ? "56px 56px 180px"
+      : "56px 56px 120px";
 
   const mapMediaRegionsToScreen = useCallback(
     (mediaRegions: Region[], mediaWidth: number, mediaHeight: number): Region[] => {
@@ -242,10 +255,13 @@ export function MirrorPage() {
     const rect = previewRef.current.getBoundingClientRect();
 
     // object-fit 的缩放计算（选区编辑态使用 contain，保证整图可见）
-    const scale =
+    const baseScale =
       selectionObjectFit === "cover"
         ? Math.max(rect.width / inputSize.width, rect.height / inputSize.height)
         : Math.min(rect.width / inputSize.width, rect.height / inputSize.height);
+
+    const scale = baseScale * (showSelection ? selectionZoom : 1);
+
     const displayWidth = inputSize.width * scale;
     const displayHeight = inputSize.height * scale;
     const offsetX = (rect.width - displayWidth) / 2;
@@ -255,6 +271,8 @@ export function MirrorPage() {
       containerRect: { width: rect.width, height: rect.height },
       inputSize,
       scale,
+      baseScale,
+      selectionZoom,
       displaySize: { width: displayWidth, height: displayHeight },
       offset: { x: offsetX, y: offsetY },
       screenRegions: regions,
@@ -289,7 +307,7 @@ export function MirrorPage() {
 
     console.log("[DEBUG] toImageRegions 最终结果:", imageRegions);
     return imageRegions;
-  }, [regions, inputSize, selectionObjectFit]);
+  }, [regions, inputSize, selectionObjectFit, showSelection, selectionZoom]);
 
   useEffect(() => {
     if (!showSelection || !isImageInput || !inputSize) {
@@ -359,6 +377,53 @@ export function MirrorPage() {
     }
     video.pause();
   }, [isVideoInput, showSelection, videoKeyFrameMs, kMirrorStates.input?.path]);
+
+  const remapRegionsForZoom = useCallback(
+    (currentRegions: Region[], oldZoom: number, newZoom: number) => {
+      if (!previewRef.current) return currentRegions;
+      const rect = previewRef.current.getBoundingClientRect();
+      const cx = rect.width / 2;
+      const cy = rect.height / 2;
+      const factor = newZoom / oldZoom;
+
+      return currentRegions.map((r) => {
+        const x = cx + (r.x - cx) * factor;
+        const y = cy + (r.y - cy) * factor;
+        const width = r.width * factor;
+        const height = r.height * factor;
+        return {
+          ...r,
+          x,
+          y,
+          width,
+          height,
+        };
+      });
+    },
+    []
+  );
+
+  const handleWheelZoom = useCallback(
+    (event: WheelEvent<HTMLDivElement>) => {
+      if (!showSelection) return;
+      event.stopPropagation();
+
+      const delta = -event.deltaY;
+      const step = 0.1;
+      const nextZoom = clamp(
+        selectionZoom + (delta > 0 ? step : -step),
+        kMinSelectionZoom,
+        kMaxSelectionZoom
+      );
+
+      if (nextZoom !== selectionZoom) {
+        const nextRegions = remapRegionsForZoom(regions, selectionZoom, nextZoom);
+        setRegions(nextRegions);
+        setSelectionZoom(nextZoom);
+      }
+    },
+    [showSelection, selectionZoom, regions, remapRegionsForZoom, clamp]
+  );
 
   const handlePointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -720,6 +785,7 @@ export function MirrorPage() {
     }
 
     setNotice(null);
+    setSelectionZoom(1);
     setIsDetectingFaces(true);
     const detected = await Server.detectVideoFaces(
       input.path,
@@ -1115,25 +1181,31 @@ export function MirrorPage() {
             </div>
           </div>
         </div>
-        <img
-          src={kMirrorStates.isMe ? mirrorMe : mirrorInput}
-          className="mirror-frame absolute w-full h-full object-cover z-3"
-          draggable={false}
-          style={{
-            maskImage:
-              "radial-gradient(circle, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 1) 40%)",
-            WebkitMaskImage:
-              "radial-gradient(circle, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 1) 40%)",
-          }}
-        />
+        {!showSelection && (
+          <img
+            src={kMirrorStates.isMe ? mirrorMe : mirrorInput}
+            className="mirror-frame absolute w-full h-full object-cover z-3"
+            draggable={false}
+            style={{
+              maskImage:
+                "radial-gradient(circle, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 1) 40%)",
+              WebkitMaskImage:
+                "radial-gradient(circle, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 1) 40%)",
+            }}
+          />
+        )}
         <div
           className="w-full h-full flex-c-c"
           style={{
-            padding: kMirrorStates.isMe ? "120px" : "100px",
+            padding: showSelection
+              ? selectionPadding
+              : kMirrorStates.isMe
+                ? "120px"
+                : "100px",
           }}
         >
           <div className={`mirror-preview ${isOverTarget ? "drop-over" : ""}`}>
-            <div className="mirror-clip">
+            <div className={`mirror-clip ${showSelection ? "rect-edit-mode" : ""}`}>
               <div
                 ref={previewRef}
                 className={`preview-container ${showSelection ? "selection-active" : ""}`}
@@ -1141,13 +1213,17 @@ export function MirrorPage() {
                 onPointerMove={handlePointerMove}
                 onPointerUp={finishSelection}
                 onPointerCancel={finishSelection}
+                onWheel={handleWheelZoom}
               >
                 {previewType === "video" ? (
                   <video
                     ref={previewVideoRef}
                     src={previewSrc}
-                    className="preview-media"
-                    style={{ objectFit: selectionObjectFit }}
+                    className={`preview-media ${showSelection ? "rect-edit-mode zoomable" : ""}`}
+                    style={{
+                      objectFit: selectionObjectFit,
+                      transform: showSelection ? `scale(${selectionZoom})` : undefined,
+                    }}
                     autoPlay={!showSelection}
                     loop={!showSelection}
                     muted
@@ -1176,8 +1252,11 @@ export function MirrorPage() {
                 ) : (
                   <img
                     src={previewSrc}
-                    className="preview-media"
-                    style={{ objectFit: selectionObjectFit }}
+                    className={`preview-media ${showSelection ? "rect-edit-mode zoomable" : ""}`}
+                    style={{
+                      objectFit: selectionObjectFit,
+                      transform: showSelection ? `scale(${selectionZoom})` : undefined,
+                    }}
                     draggable={false}
                   />
                 )}
