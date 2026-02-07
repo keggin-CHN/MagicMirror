@@ -67,7 +67,7 @@ jobs:
       - name: Build APP
         shell: pwsh
         run: |
-          pnpm install
+          pnpm install --no-frozen-lockfile
           $VERSION = node -p "require('./package.json').version"
           pnpm tauri build -c "{\`"version\`":\`"$VERSION\`"}" -t ${{ matrix.target }} --bundles nsis
           $APP_NAME = "MagicMirror_${VERSION}_${{ matrix.build }}_${{ matrix.arch }}"
