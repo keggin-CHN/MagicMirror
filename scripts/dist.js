@@ -4,15 +4,26 @@ import fs from "fs/promises";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
 
-const getFiles = async (dir) => {
+// Helper to recursively find files
+async function findFiles(dir, predicate) {
+  let results = [];
+  if (!existsSync(dir)) return results;
+
   try {
-    const files = await fs.readdir(dir);
-    return files;
+    const list = await fs.readdir(dir, { withFileTypes: true });
+    for (const dirent of list) {
+      const fullPath = path.join(dir, dirent.name);
+      if (dirent.isDirectory()) {
+        results = results.concat(await findFiles(fullPath, predicate));
+      } else if (predicate(fullPath)) {
+        results.push(fullPath);
+      }
+    }
   } catch (err) {
-    console.error(`Error reading directory ${dir}:`, err);
-    return [];
+    console.error(`Error reading ${dir}: ${err.message}`);
   }
-};
+  return results;
+}
 
 const copyFile = async (from, to) => {
   if (!existsSync(from)) {
@@ -25,52 +36,61 @@ const copyFile = async (from, to) => {
     mkdirSync(dirname, { recursive: true });
   }
 
-  await fs.copyFile(from, to).catch(() => null);
+  await fs.copyFile(from, to);
+  console.log(`Copied ${from} -> ${to}`);
 };
 
 async function main() {
   const args = process.argv.slice(2);
   const [target, appName] = args;
-  const bundleDirWithTarget = path.resolve(
-    `src-tauri/target/${target}/release/bundle`
-  );
-  const bundleDirWithoutTarget = path.resolve(`src-tauri/target/release/bundle`);
 
-  let bundleDir = bundleDirWithTarget;
-  if (!existsSync(bundleDir) && existsSync(bundleDirWithoutTarget)) {
-    bundleDir = bundleDirWithoutTarget;
-  }
+  console.log(`Target: ${target}`);
+  console.log(`AppName: ${appName}`);
+  console.log(`Platform: ${process.platform}`);
 
-  console.log(`Using bundle directory: ${bundleDir}`);
+  const targetBase = path.resolve("src-tauri/target");
+  console.log(`Searching in: ${targetBase}`);
 
-  let outputs = {};
+  let extensions = [];
   switch (process.platform) {
     case "darwin":
-      outputs = {
-        dmg: [".dmg"],
-      };
+      extensions = [".dmg"];
       break;
     case "win32":
-      outputs = {
-        nsis: [".exe"],
-      };
+      extensions = [".exe"];
+      break;
+    default:
+      console.warn(`Unsupported platform: ${process.platform}`);
   }
-  for (const dir in outputs) {
-    const targetDir = path.join(bundleDir, dir);
-    const files = await getFiles(targetDir);
-    if (files.length === 0) {
-      console.warn(`No files found in ${targetDir}`);
-    }
-    for (const filename of files) {
-      const suffix = outputs[dir].find((e) => filename.endsWith(e));
-      if (suffix) {
-        await copyFile(
-          path.join(targetDir, filename),
-          path.join("dist", appName + suffix)
-        );
-        console.log(`✅ ${appName + suffix}`);
-      }
-    }
+
+  if (extensions.length === 0) return;
+
+  // Find all files with matching extensions in target directory
+  // that are also in a 'bundle' directory and 'release' directory
+  const files = await findFiles(targetBase, (filePath) => {
+    return extensions.some(ext => filePath.endsWith(ext)) &&
+      filePath.includes("release") &&
+      filePath.includes("bundle");
+  });
+
+  if (files.length === 0) {
+    console.error("No bundle files found!");
+
+    // Debug: List all files in bundle directories
+    console.log("Listing all files in 'bundle' directories for debugging:");
+    const debugFiles = await findFiles(targetBase, (p) => p.includes("bundle"));
+    console.log(debugFiles.join("\n"));
+
+    process.exit(1);
+  }
+
+  console.log("Found candidates:", files);
+
+  // Copy found files
+  for (const file of files) {
+    const ext = path.extname(file);
+    await copyFile(file, path.join("dist", appName + ext));
+    console.log(`✅ ${appName + ext}`);
   }
 }
 
