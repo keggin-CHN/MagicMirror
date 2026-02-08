@@ -51,7 +51,7 @@ export interface TaskResult {
 }
 
 export interface VideoTaskProgress {
-  status: "idle" | "running" | "success" | "failed" | "cancelled";
+  status: "idle" | "queued" | "running" | "success" | "failed" | "cancelled";
   progress: number;
   etaSeconds?: number | null;
   error?: string | null;
