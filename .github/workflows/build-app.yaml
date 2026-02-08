@@ -69,7 +69,8 @@ jobs:
         run: |
           pnpm install --no-frozen-lockfile
           $VERSION = node -p "require('./package.json').version"
-          pnpm tauri build -c "{\`"version\`":\`"$VERSION\`"}" -t ${{ matrix.target }} --bundles nsis
+          $CONFIG = "{`"version`":`"$VERSION`"}"
+          pnpm tauri build -c $CONFIG -t ${{ matrix.target }} --bundles nsis
           $APP_NAME = "MagicMirror_${VERSION}_${{ matrix.build }}_${{ matrix.arch }}"
           node scripts/dist.js ${{ matrix.target }} $APP_NAME
       - name: Upload App
