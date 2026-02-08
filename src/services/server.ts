@@ -34,6 +34,7 @@ export interface VideoTask {
   regions?: Region[];
   faceSources?: FaceSource[];
   keyFrameMs?: number;
+  useGpu?: boolean;
 }
 
 export interface DetectFacesResult {

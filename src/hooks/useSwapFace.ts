@@ -74,29 +74,40 @@ export function useSwapFace() {
 
       const pollProgress = async () => {
         while (polling) {
-          const state = await Server.getVideoTaskProgress(taskId);
-          if (state.status === "running" || state.status === "success") {
-            setVideoProgress(state.progress ?? 0);
-            setVideoEtaSeconds(state.etaSeconds ?? null);
-            setVideoStage(state.stage ?? null);
-            if (state.status === "success" && state.result) {
-              finalResult = state.result;
+          try {
+            const state = await Server.getVideoTaskProgress(taskId);
+
+            // 处理所有状态，包括 "queued"
+            if (state.status === "queued" || state.status === "running" || state.status === "success") {
+              setVideoProgress(state.progress ?? 0);
+              setVideoEtaSeconds(state.etaSeconds ?? null);
+              setVideoStage(state.stage ?? null);
+              if (state.status === "success" && state.result) {
+                finalResult = state.result;
+                polling = false;
+                break;
+              }
+            } else if (state.status === "failed") {
+              setVideoEtaSeconds(null);
+              setVideoStage(state.stage ?? "failed");
+              setError(state.error ?? "unknown");
               polling = false;
+              break;
+            } else if (state.status === "cancelled") {
+              setVideoEtaSeconds(null);
+              setVideoStage(state.stage ?? "cancelled");
+              polling = false;
+              break;
             }
-          } else if (state.status === "failed") {
-            setVideoEtaSeconds(null);
-            setVideoStage(state.stage ?? "failed");
-            setError(state.error ?? "unknown");
-            polling = false;
-          } else if (state.status === "cancelled") {
-            setVideoEtaSeconds(null);
-            setVideoStage(state.stage ?? "cancelled");
-            polling = false;
+
+            // 轮询间隔优化：根据进度动态调整
+            const interval = state.progress > 0 ? 500 : 1000;
+            await new Promise((resolve) => setTimeout(resolve, interval));
+          } catch (error) {
+            console.error("[useSwapFace] 轮询进度失败:", error);
+            // 网络错误时继续轮询，但增加间隔
+            await new Promise((resolve) => setTimeout(resolve, 2000));
           }
-          if (!polling) {
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 400));
         }
       };
 

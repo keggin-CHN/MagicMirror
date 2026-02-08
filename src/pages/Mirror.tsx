@@ -974,6 +974,13 @@ export function MirrorPage() {
     };
 
     if (input.type === "video") {
+      // 询问用户是否使用 GPU 加速
+      const useGpu = window.confirm(
+        t("Enable GPU acceleration for faster processing?") + "\n\n" +
+        t("GPU acceleration can speed up video processing by 10-50x, but requires compatible graphics drivers.") + "\n\n" +
+        t("Click OK to enable GPU, or Cancel to use CPU only.")
+      );
+
       if (isMultiFaceMode) {
         if (!regions.length) {
           setNotice(t("Please select at least one area."));
@@ -1006,6 +1013,7 @@ export function MirrorPage() {
             path: item.path,
           })),
           keyFrameMs: Math.max(0, Math.round(videoKeyFrameMs)),
+          useGpu: useGpu,
         });
 
         setSuccess(result != null);
@@ -1027,6 +1035,7 @@ export function MirrorPage() {
       const result = await swapVideo({
         inputVideo: input.path,
         targetFace: me.path,
+        useGpu: useGpu,
       });
 
       setSuccess(result != null);

@@ -5,13 +5,22 @@ import threading
 import traceback
 from functools import lru_cache
 import time
+import queue
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 import cv2
 import numpy as np
 from tinyface import TinyFace
 
+# 全局 TinyFace 实例（CPU 版本）
 _tf = TinyFace()
 _tf_lock = threading.RLock()
+
+# GPU 加速的 TinyFace 实例（按需创建）
+_tf_gpu = None
+_tf_gpu_lock = threading.RLock()
+_gpu_initialized = False
 
 
 def _log_error(context: str, error: Exception):
@@ -34,6 +43,68 @@ def load_models():
         return True
     except BaseException as _:
         return False
+
+
+def _init_gpu_models():
+    """初始化 GPU 加速的模型（使用 DirectML）"""
+    global _tf_gpu, _gpu_initialized
+    
+    # 使用锁保护初始化检查，避免竞态条件
+    with _tf_gpu_lock:
+        if _gpu_initialized:
+            return _tf_gpu is not None
+        
+        try:
+        print("[INFO] 正在初始化 GPU 加速模型...")
+        import onnxruntime as ort
+        
+        # 检查可用的 ExecutionProvider
+        available_providers = ort.get_available_providers()
+        print(f"[INFO] 可用的 ExecutionProvider: {available_providers}")
+        
+        # 优先使用 DirectML（Windows 通用），其次 CUDA
+        if 'DmlExecutionProvider' in available_providers:
+            providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
+            print("[INFO] 使用 DirectML 加速")
+        elif 'CUDAExecutionProvider' in available_providers:
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            print("[INFO] 使用 CUDA 加速")
+        else:
+            print("[WARN] 未找到 GPU ExecutionProvider，回退到 CPU")
+            _gpu_initialized = True
+            return False
+        
+        # 创建 GPU 版本的 TinyFace 实例
+        _tf_gpu = TinyFace()
+        _tf_gpu.config.face_detector_model = _get_model_path("scrfd_2.5g.onnx")
+        _tf_gpu.config.face_embedder_model = _get_model_path("arcface_w600k_r50.onnx")
+        _tf_gpu.config.face_swapper_model = _get_model_path("inswapper_128_fp16.onnx")
+        _tf_gpu.config.face_enhancer_model = _get_model_path("gfpgan_1.4.onnx")
+        
+        # 设置 ExecutionProvider
+        _tf_gpu.config.execution_providers = providers
+        
+            _tf_gpu.prepare()
+            _gpu_initialized = True
+            print("[SUCCESS] GPU 模型初始化成功")
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] GPU 模型初始化失败: {str(e)}")
+            print(traceback.format_exc())
+            _tf_gpu = None
+            _gpu_initialized = True
+            return False
+
+
+def _get_tf_instance(use_gpu=False):
+    """获取 TinyFace 实例（CPU 或 GPU）"""
+    if use_gpu:
+        if _init_gpu_models() and _tf_gpu is not None:
+            return _tf_gpu, _tf_gpu_lock
+        else:
+            print("[WARN] GPU 不可用，回退到 CPU")
+    return _tf, _tf_lock
 
 
 def _emit_stage(stage_callback, stage: str):
@@ -167,10 +238,10 @@ def swap_face_regions_by_sources(input_path, face_sources, regions):
         raise
 
 
-def swap_face_video(input_path, face_path, progress_callback=None, stage_callback=None):
+def swap_face_video(input_path, face_path, progress_callback=None, stage_callback=None, use_gpu=False):
     try:
         _emit_stage(stage_callback, "validating-input")
-        print(f"[INFO] 开始视频换脸: input={input_path}, face={face_path}")
+        print(f"[INFO] 开始视频换脸: input={input_path}, face={face_path}, use_gpu={use_gpu}")
 
         # 检查输入文件是否存在
         if not os.path.exists(input_path):
@@ -187,6 +258,7 @@ def swap_face_video(input_path, face_path, progress_callback=None, stage_callbac
             save_path,
             progress_callback=progress_callback,
             stage_callback=stage_callback,
+            use_gpu=use_gpu,
         )
 
         if not output_path or not os.path.exists(output_path):
@@ -214,9 +286,35 @@ def _swap_face_video(
     save_path,
     progress_callback=None,
     stage_callback=None,
+    use_gpu=False,
 ):
+    """
+    视频换脸处理（支持 GPU 加速和多线程处理池）
+    
+    架构：
+    - 读取线程：从视频读取帧 -> read_queue
+    - 处理线程池：多个线程并行处理帧 -> write_queue
+    - 写入线程：从 write_queue 取帧 -> 写入输出视频
+    """
     cap = None
     writer = None
+    
+    # 动态计算队列大小和线程数
+    cpu_count = multiprocessing.cpu_count()
+    # GPU模式：使用较少线程避免锁竞争；CPU模式：使用更多线程
+    num_workers = 2 if use_gpu else max(2, cpu_count - 1)
+    queue_size = max(5, num_workers * 2)  # 队列大小为线程数的2倍
+    
+    print(f"[INFO] 使用 {num_workers} 个处理线程，队列大小: {queue_size}")
+    
+    # 多线程队列
+    read_queue = queue.Queue(maxsize=queue_size)
+    write_queue = queue.PriorityQueue(maxsize=queue_size)  # 使用优先队列保证顺序
+    
+    # 控制标志
+    stop_event = threading.Event()  # 统一的停止标志
+    processing_error = threading.Lock()  # 使用锁保护错误
+    error_container = {'error': None}  # 线程安全的错误容器
 
     try:
         _emit_stage(stage_callback, "opening-video")
@@ -240,13 +338,11 @@ def _swap_face_video(
 
         print(f"[INFO] 视频尺寸: {width}x{height}, 总帧数: {total_frames}")
 
-        first_frame = None
         if width <= 0 or height <= 0:
             print("[WARN] 无法获取视频尺寸，尝试读取第一帧")
             ok, frame = cap.read()
             if not ok:
                 raise RuntimeError("video-open-failed")
-            first_frame = frame
             height, width = frame.shape[:2]
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             print(f"[INFO] 从第一帧获取尺寸: {width}x{height}")
@@ -259,90 +355,183 @@ def _swap_face_video(
             raise RuntimeError("video-write-failed")
 
         # 提取目标人脸
+        _emit_stage(stage_callback, "extracting-target-face")
         print(f"[INFO] 提取目标人脸: {face_path}")
-        destination_face = _get_one_face(face_path)
+        tf_instance, tf_lock = _get_tf_instance(use_gpu)
+        with tf_lock:
+            destination_face = tf_instance.get_one_face(_read_image(face_path))
         if destination_face is None:
             raise RuntimeError("no-face-detected")
         print("[SUCCESS] 成功提取目标人脸")
 
-        # 逐帧处理
-        frame_count = 0
-        processed_count = 0
-        failed_count = 0
-        start_time = time.time()
+        # 统计信息
+        stats = {
+            'frame_count': 0,
+            'processed_count': 0,
+            'failed_count': 0,
+            'start_time': time.time()
+        }
+        stats_lock = threading.Lock()
 
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-
-            frame_count += 1
-            if progress_callback and frame_count % 5 == 0:
-                try:
-                    progress_callback(
-                        frame_count=frame_count,
-                        total_frames=total_frames,
-                        elapsed_seconds=max(0.0, time.time() - start_time),
-                    )
-                except Exception as e:
-                    print(f"[WARN] progress_callback failed: {str(e)}")
-
-            if frame_count % 30 == 0:  # 每30帧打印一次进度
-                progress = (frame_count / total_frames * 100) if total_frames > 0 else 0
-                print(
-                    f"[PROGRESS] 处理进度: {frame_count}/{total_frames} ({progress:.1f}%)"
-                )
-
+        # 读取线程
+        def read_frames():
             try:
-                with _tf_lock:
-                    reference_face = _tf.get_one_face(frame)
-                if reference_face is None:
-                    writer.write(frame)
-                    failed_count += 1
-                    continue
-
-                with _tf_lock:
-                    output_frame = _tf.swap_face(
-                        vision_frame=frame,
-                        reference_face=reference_face,
-                        destination_face=destination_face,
-                    )
-
-                out = output_frame if output_frame is not None else frame
-
-                # 防御：确保写入帧尺寸/通道匹配（部分模型/输入可能导致尺寸变化）
-                if out is None:
-                    out = frame
-                if len(out.shape) == 2:
-                    out = cv2.cvtColor(out, cv2.COLOR_GRAY2BGR)
-                elif out.shape[2] == 4:
-                    out = cv2.cvtColor(out, cv2.COLOR_BGRA2BGR)
-                if out.shape[1] != width or out.shape[0] != height:
-                    out = cv2.resize(out, (width, height), interpolation=cv2.INTER_LINEAR)
-                if out.dtype != np.uint8:
-                    out = cv2.normalize(out, None, 0, 255, cv2.NORM_MINMAX).astype(
-                        np.uint8
-                    )
-
-                writer.write(out)
-                processed_count += 1
-
+                frame_idx = 0
+                while not stop_event.is_set():
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    read_queue.put((frame_idx, frame), timeout=1)
+                    frame_idx += 1
+                # 发送结束信号
+                for _ in range(num_workers):
+                    read_queue.put((None, None))
             except Exception as e:
-                print(f"[WARN] 第{frame_count}帧处理失败: {str(e)}")
-                writer.write(frame)
-                failed_count += 1
+                with processing_error:
+                    error_container['error'] = e
+                print(f"[ERROR] 读取线程异常: {str(e)}")
+                stop_event.set()
 
+        # 处理线程（多个）
+        def process_frames(worker_id):
+            try:
+                while not stop_event.is_set():
+                    try:
+                        frame_idx, frame = read_queue.get(timeout=1)
+                    except queue.Empty:
+                        continue
+                    
+                    # 结束信号
+                    if frame_idx is None:
+                        break
+                    
+                    with stats_lock:
+                        stats['frame_count'] += 1
+                        current_frame = stats['frame_count']
+                    
+                    # 进度回调
+                    if progress_callback and current_frame % 5 == 0:
+                        try:
+                            with stats_lock:
+                                progress_callback(
+                                    frame_count=current_frame,
+                                    total_frames=total_frames,
+                                    elapsed_seconds=max(0.0, time.time() - stats['start_time']),
+                                )
+                        except Exception as e:
+                            print(f"[WARN] progress_callback failed: {str(e)}")
+                    
+                    if current_frame % 30 == 0:
+                        progress = (current_frame / total_frames * 100) if total_frames > 0 else 0
+                        print(f"[PROGRESS] 处理进度: {current_frame}/{total_frames} ({progress:.1f}%) [Worker-{worker_id}]")
+                    
+                    # 人脸检测和换脸
+                    try:
+                        with tf_lock:
+                            reference_face = tf_instance.get_one_face(frame)
+                        
+                        if reference_face is None:
+                            write_queue.put((frame_idx, frame))
+                            with stats_lock:
+                                stats['failed_count'] += 1
+                            continue
+                        
+                        with tf_lock:
+                            output_frame = tf_instance.swap_face(
+                                vision_frame=frame,
+                                reference_face=reference_face,
+                                destination_face=destination_face,
+                            )
+                        
+                        out = output_frame if output_frame is not None else frame
+                        out = _normalize_output_frame(out, width, height)
+                        write_queue.put((frame_idx, out))
+                        
+                        with stats_lock:
+                            stats['processed_count'] += 1
+                    
+                    except Exception as e:
+                        print(f"[WARN] 第{current_frame}帧处理失败: {str(e)}")
+                        write_queue.put((frame_idx, frame))
+                        with stats_lock:
+                            stats['failed_count'] += 1
+            
+            except Exception as e:
+                with processing_error:
+                    error_container['error'] = e
+                print(f"[ERROR] 处理线程 Worker-{worker_id} 异常: {str(e)}")
+                stop_event.set()
+
+        # 写入线程（按顺序写入）
+        def write_frames():
+            try:
+                _emit_stage(stage_callback, "processing-video-frames")
+                next_frame_idx = 0
+                frame_buffer = {}  # 缓存乱序到达的帧
+                frames_written = 0
+                
+                while not stop_event.is_set():
+                    try:
+                        frame_idx, frame = write_queue.get(timeout=1)
+                    except queue.Empty:
+                        continue
+                    
+                    # 缓存帧
+                    frame_buffer[frame_idx] = frame
+                    
+                    # 按顺序写入
+                    while next_frame_idx in frame_buffer:
+                        writer.write(frame_buffer.pop(next_frame_idx))
+                        frames_written += 1
+                        next_frame_idx += 1
+                    
+                    # 检查是否完成
+                    if frames_written >= total_frames and total_frames > 0:
+                        break
+                        
+            except Exception as e:
+                with processing_error:
+                    error_container['error'] = e
+                print(f"[ERROR] 写入线程异常: {str(e)}")
+                stop_event.set()
+
+        # 启动线程
+        read_thread = threading.Thread(target=read_frames, name="VideoReader", daemon=True)
+        process_threads = [
+            threading.Thread(target=process_frames, args=(i,), name=f"VideoProcessor-{i}", daemon=True)
+            for i in range(num_workers)
+        ]
+        write_thread = threading.Thread(target=write_frames, name="VideoWriter", daemon=True)
+        
+        read_thread.start()
+        for t in process_threads:
+            t.start()
+        write_thread.start()
+        
+        # 等待所有线程完成
+        read_thread.join()
+        for t in process_threads:
+            t.join()
+        write_thread.join()
+        
+        # 检查是否有错误
+        with processing_error:
+            if error_container['error'] is not None:
+                raise error_container['error']
+        
         print("[INFO] 视频处理完成:")
-        print(f"  - 总帧数: {frame_count}")
-        print(f"  - 成功换脸: {processed_count}")
-        print(f"  - 跳过/失败: {failed_count}")
-
+        print(f"  - 总帧数: {stats['frame_count']}")
+        print(f"  - 成功换脸: {stats['processed_count']}")
+        print(f"  - 跳过/失败: {stats['failed_count']}")
+        
+        # 最终进度回调
         if progress_callback:
             try:
+                final_count = total_frames if total_frames > 0 else stats['frame_count']
                 progress_callback(
-                    frame_count=total_frames if total_frames > 0 else frame_count,
-                    total_frames=total_frames if total_frames > 0 else frame_count,
-                    elapsed_seconds=max(0.0, time.time() - start_time),
+                    frame_count=final_count,
+                    total_frames=final_count,
+                    elapsed_seconds=max(0.0, time.time() - stats['start_time']),
                 )
             except Exception as e:
                 print(f"[WARN] progress_callback(final) failed: {str(e)}")
@@ -350,10 +539,15 @@ def _swap_face_video(
         return save_path
 
     except Exception as e:
+        # 停止所有线程
+        stop_event.set()
         _log_error("_swap_face_video", e)
         raise
 
     finally:
+        # 确保所有线程停止
+        stop_event.set()
+        
         if cap is not None:
             cap.release()
             print("[INFO] 释放视频读取器")
@@ -663,6 +857,7 @@ def swap_face_video_by_sources(
     key_frame_ms=0,
     progress_callback=None,
     stage_callback=None,
+    use_gpu=False,
 ):
     try:
         _emit_stage(stage_callback, "validating-input")
@@ -678,6 +873,7 @@ def swap_face_video_by_sources(
             save_path=save_path,
             progress_callback=progress_callback,
             stage_callback=stage_callback,
+            use_gpu=use_gpu,
         )
 
         if not output_path or not os.path.exists(output_path):
@@ -704,9 +900,30 @@ def _swap_face_video_by_sources(
     save_path,
     progress_callback=None,
     stage_callback=None,
+    use_gpu=False,
 ):
+    """
+    多人换脸视频处理（使用多线程架构）
+    """
     cap = None
     writer = None
+    
+    # 动态计算队列大小和线程数
+    cpu_count = multiprocessing.cpu_count()
+    num_workers = 2 if use_gpu else max(2, cpu_count - 1)
+    queue_size = max(5, num_workers * 2)
+    
+    print(f"[INFO] 多人换脸使用 {num_workers} 个处理线程，队列大小: {queue_size}")
+    
+    # 多线程队列
+    read_queue = queue.Queue(maxsize=queue_size)
+    write_queue = queue.PriorityQueue(maxsize=queue_size)
+    
+    # 控制标志
+    stop_event = threading.Event()
+    processing_error = threading.Lock()
+    error_container = {'error': None}
+    
     try:
         _emit_stage(stage_callback, "opening-video")
         cap = cv2.VideoCapture(input_path)
@@ -734,9 +951,12 @@ def _swap_face_video_by_sources(
             raise RuntimeError("invalid-face-source-binding")
 
         _emit_stage(stage_callback, "extracting-target-face")
+        tf_instance, tf_lock = _get_tf_instance(use_gpu)
         destination_faces = {}
         for source_id, source_path in face_sources.items():
-            destination_face = _get_one_face(source_path)
+            face_img = _read_image(source_path)
+            with tf_lock:
+                destination_face = tf_instance.get_one_face(face_img)
             if destination_face is None:
                 raise RuntimeError("no-face-detected")
             destination_faces[str(source_id)] = destination_face
@@ -758,104 +978,215 @@ def _swap_face_video_by_sources(
             raise RuntimeError("video-frame-read-failed")
 
         _emit_stage(stage_callback, "building-face-tracks")
-        key_detections = _get_faces_with_boxes(key_frame)
+        key_detections = _get_faces_with_boxes(key_frame, tf_instance, tf_lock)
         tracks = _build_tracks_from_seed_regions(normalized_regions, key_detections)
         if not tracks:
             raise RuntimeError("no-face-in-selected-regions")
 
-        _emit_stage(stage_callback, "processing-video-frames")
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        frame_count = 0
-        processed_faces = 0
-        start_time = time.time()
+        # 共享的轨迹数据（需要线程安全）
+        tracks_lock = threading.Lock()
+        stats = {
+            'frame_count': 0,
+            'processed_faces': 0,
+            'start_time': time.time()
+        }
+        stats_lock = threading.Lock()
 
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            frame_count += 1
+        # 读取线程
+        def read_frames():
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                frame_idx = 0
+                while not stop_event.is_set():
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    read_queue.put((frame_idx, frame), timeout=1)
+                    frame_idx += 1
+                for _ in range(num_workers):
+                    read_queue.put((None, None))
+            except Exception as e:
+                with processing_error:
+                    error_container['error'] = e
+                print(f"[ERROR] 读取线程异常: {str(e)}")
+                stop_event.set()
 
-            detections = _get_faces_with_boxes(frame)
-            matches = _match_tracks_to_detections(tracks, detections)
+        # 处理线程（多个）
+        def process_frames(worker_id):
+            try:
+                _emit_stage(stage_callback, "processing-video-frames")
+                while not stop_event.is_set():
+                    try:
+                        frame_idx, frame = read_queue.get(timeout=1)
+                    except queue.Empty:
+                        continue
+                    
+                    if frame_idx is None:
+                        break
+                    
+                    with stats_lock:
+                        stats['frame_count'] += 1
+                        current_frame = stats['frame_count']
+                    
+                    # 进度回调
+                    if progress_callback and current_frame % 5 == 0:
+                        try:
+                            with stats_lock:
+                                progress_callback(
+                                    frame_count=current_frame,
+                                    total_frames=total_frames,
+                                    elapsed_seconds=max(0.0, time.time() - stats['start_time']),
+                                )
+                        except Exception as e:
+                            print(f"[WARN] progress_callback failed: {str(e)}")
+                    
+                    # 人脸检测
+                    detections = _get_faces_with_boxes(frame, tf_instance, tf_lock)
+                    
+                    # 匹配轨迹（需要锁保护）
+                    with tracks_lock:
+                        matches = _match_tracks_to_detections(tracks, detections)
+                        matched_track_ids = set()
+                        
+                        # 更新轨迹
+                        for track_id, det_idx in matches:
+                            track = tracks.get(track_id)
+                            if track is None:
+                                continue
+                            detection = detections[det_idx]
+                            track["box"] = detection["box"]
+                            track["missed"] = 0
+                            matched_track_ids.add(track_id)
+                        
+                        # 清理过期轨迹
+                        stale_track_ids = []
+                        for track_id, track in tracks.items():
+                            if track_id in matched_track_ids:
+                                continue
+                            track["missed"] = int(track.get("missed", 0)) + 1
+                            if track["missed"] > 45:
+                                stale_track_ids.append(track_id)
+                        
+                        for track_id in stale_track_ids:
+                            tracks.pop(track_id, None)
+                    
+                    # 换脸处理
+                    out = frame
+                    for track_id, det_idx in matches:
+                        with tracks_lock:
+                            track = tracks.get(track_id)
+                        if track is None:
+                            continue
+                        
+                        detection = detections[det_idx]
+                        source_id = track.get("faceSourceId")
+                        destination_face = destination_faces.get(str(source_id))
+                        if destination_face is None:
+                            continue
+                        
+                        reference_face = detection.get("face")
+                        if reference_face is None:
+                            continue
+                        
+                        try:
+                            with tf_lock:
+                                swapped = tf_instance.swap_face(
+                                    vision_frame=out,
+                                    reference_face=reference_face,
+                                    destination_face=destination_face,
+                                )
+                            if swapped is not None:
+                                out = swapped
+                                with stats_lock:
+                                    stats['processed_faces'] += 1
+                        except Exception as e:
+                            print(f"[WARN] 帧{current_frame} 轨迹{track_id} 换脸失败: {str(e)}")
+                    
+                    out = _normalize_output_frame(out, width, height)
+                    write_queue.put((frame_idx, out))
+                    
+            except Exception as e:
+                with processing_error:
+                    error_container['error'] = e
+                print(f"[ERROR] 处理线程 Worker-{worker_id} 异常: {str(e)}")
+                stop_event.set()
 
-            matched_track_ids = set()
-            out = frame
+        # 写入线程
+        def write_frames():
+            try:
+                next_frame_idx = 0
+                frame_buffer = {}
+                frames_written = 0
+                
+                while not stop_event.is_set():
+                    try:
+                        frame_idx, frame = write_queue.get(timeout=1)
+                    except queue.Empty:
+                        continue
+                    
+                    frame_buffer[frame_idx] = frame
+                    
+                    while next_frame_idx in frame_buffer:
+                        writer.write(frame_buffer.pop(next_frame_idx))
+                        frames_written += 1
+                        next_frame_idx += 1
+                    
+                    if frames_written >= total_frames and total_frames > 0:
+                        break
+                        
+            except Exception as e:
+                with processing_error:
+                    error_container['error'] = e
+                print(f"[ERROR] 写入线程异常: {str(e)}")
+                stop_event.set()
 
-            for track_id, det_idx in matches:
-                track = tracks.get(track_id)
-                if track is None:
-                    continue
-                detection = detections[det_idx]
-                track["box"] = detection["box"]
-                track["missed"] = 0
-                matched_track_ids.add(track_id)
+        # 启动线程
+        read_thread = threading.Thread(target=read_frames, name="VideoReader", daemon=True)
+        process_threads = [
+            threading.Thread(target=process_frames, args=(i,), name=f"VideoProcessor-{i}", daemon=True)
+            for i in range(num_workers)
+        ]
+        write_thread = threading.Thread(target=write_frames, name="VideoWriter", daemon=True)
+        
+        read_thread.start()
+        for t in process_threads:
+            t.start()
+        write_thread.start()
+        
+        # 等待所有线程完成
+        read_thread.join()
+        for t in process_threads:
+            t.join()
+        write_thread.join()
+        
+        # 检查是否有错误
+        with processing_error:
+            if error_container['error'] is not None:
+                raise error_container['error']
 
-                source_id = track.get("faceSourceId")
-                destination_face = destination_faces.get(str(source_id))
-                if destination_face is None:
-                    continue
-
-                reference_face = detection.get("face")
-                if reference_face is None:
-                    continue
-
-                try:
-                    with _tf_lock:
-                        swapped = _tf.swap_face(
-                            vision_frame=out,
-                            reference_face=reference_face,
-                            destination_face=destination_face,
-                        )
-                    if swapped is not None:
-                        out = swapped
-                        processed_faces += 1
-                except Exception as e:
-                    print(f"[WARN] 帧{frame_count} 轨迹{track_id} 换脸失败: {str(e)}")
-
-            stale_track_ids = []
-            for track_id, track in tracks.items():
-                if track_id in matched_track_ids:
-                    continue
-                track["missed"] = int(track.get("missed", 0)) + 1
-                if track["missed"] > 45:
-                    stale_track_ids.append(track_id)
-
-            for track_id in stale_track_ids:
-                tracks.pop(track_id, None)
-
-            out = _normalize_output_frame(out, width, height)
-            writer.write(out)
-
-            if progress_callback and frame_count % 5 == 0:
-                try:
-                    progress_callback(
-                        frame_count=frame_count,
-                        total_frames=total_frames,
-                        elapsed_seconds=max(0.0, time.time() - start_time),
-                    )
-                except Exception as e:
-                    print(f"[WARN] progress_callback failed: {str(e)}")
-
+        # 最终进度回调
         if progress_callback:
             try:
-                final_total = total_frames if total_frames > 0 else frame_count
+                final_total = total_frames if total_frames > 0 else stats['frame_count']
                 progress_callback(
                     frame_count=final_total,
                     total_frames=final_total,
-                    elapsed_seconds=max(0.0, time.time() - start_time),
+                    elapsed_seconds=max(0.0, time.time() - stats['start_time']),
                 )
             except Exception as e:
                 print(f"[WARN] progress_callback(final) failed: {str(e)}")
 
         print(
-            f"[INFO] 视频多人换脸完成: 总帧={frame_count}, 成功换脸人次={processed_faces}, 轨迹数={len(tracks)}"
+            f"[INFO] 视频多人换脸完成: 总帧={stats['frame_count']}, 成功换脸人次={stats['processed_faces']}, 轨迹数={len(tracks)}"
         )
         return save_path
 
     except Exception as e:
+        stop_event.set()
         _log_error("_swap_face_video_by_sources", e)
         raise
     finally:
+        stop_event.set()
         if cap is not None:
             cap.release()
         if writer is not None:
@@ -897,12 +1228,18 @@ def _detect_face_boxes_in_frame(frame, search_areas):
     return deduped
 
 
-def _get_faces_with_boxes(frame):
+def _get_faces_with_boxes(frame, tf_instance=None, tf_lock=None):
+    """获取帧中的人脸及其边界框"""
+    if tf_instance is None:
+        tf_instance = _tf
+    if tf_lock is None:
+        tf_lock = _tf_lock
+    
     faces = []
-    with _tf_lock:
-        if hasattr(_tf, "get_many_faces"):
+    with tf_lock:
+        if hasattr(tf_instance, "get_many_faces"):
             try:
-                many = _tf.get_many_faces(frame)
+                many = tf_instance.get_many_faces(frame)
                 if many:
                     faces = list(many)
             except Exception:
@@ -910,7 +1247,7 @@ def _get_faces_with_boxes(frame):
 
         if not faces:
             try:
-                one = _tf.get_one_face(frame)
+                one = tf_instance.get_one_face(frame)
                 if one is not None:
                     faces = [one]
             except Exception:

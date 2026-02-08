@@ -345,6 +345,7 @@ def create_video_task():
         regions = body.get("regions")
         face_sources = body.get("faceSources")
         key_frame_ms = body.get("keyFrameMs", 0)
+        use_gpu = body.get("useGpu", False)
         has_face_sources = "faceSources" in body
 
         print("[API] 收到视频换脸请求:")
@@ -353,6 +354,7 @@ def create_video_task():
         print(f"  - target_face: {target_face}")
         print(f"  - has_face_sources: {has_face_sources}")
         print(f"  - key_frame_ms: {key_frame_ms}")
+        print(f"  - use_gpu: {use_gpu}")
 
         if not all([task_id, input_video]):
             response.status = 400
@@ -413,36 +415,7 @@ def create_video_task():
                 key_frame_ms = 0
             key_frame_ms = max(0, key_frame_ms)
 
-            task_callable = lambda: swap_face_video_by_sources(
-                input_video,
-                source_map,
-                regions,
-                key_frame_ms=key_frame_ms,
-                progress_callback=_on_progress,
-                stage_callback=_on_stage,
-            )
-        else:
-            if not target_face:
-                response.status = 400
-                return {"error": "missing-params"}
-
-            try:
-                _validate_file(
-                    target_face,
-                    ALLOWED_IMAGE_EXTS,
-                    missing_code="unsupported-image-format",
-                )
-            except (RuntimeError, FileNotFoundError) as e:
-                response.status = 400
-                return {"error": _simplify_task_error(e)}
-
-            task_callable = lambda: swap_face_video(
-                input_video,
-                target_face,
-                progress_callback=_on_progress,
-                stage_callback=_on_stage,
-            )
-
+        # 先设置初始状态
         _set_video_task_progress(
             task_id,
             status="running",
@@ -453,6 +426,7 @@ def create_video_task():
             stage="queued",
         )
 
+        # 定义回调函数（必须在 task_callable 之前定义）
         def _on_stage(stage: str):
             _set_video_task_progress(
                 task_id,
@@ -476,6 +450,40 @@ def create_video_task():
                 progress=round(progress, 2),
                 etaSeconds=eta_seconds,
                 error=None,
+            )
+
+        # 现在定义 task_callable，此时回调函数已经存在
+        if has_face_sources:
+            task_callable = lambda: swap_face_video_by_sources(
+                input_video,
+                source_map,
+                regions,
+                key_frame_ms=key_frame_ms,
+                progress_callback=_on_progress,
+                stage_callback=_on_stage,
+                use_gpu=use_gpu,
+            )
+        else:
+            if not target_face:
+                response.status = 400
+                return {"error": "missing-params"}
+
+            try:
+                _validate_file(
+                    target_face,
+                    ALLOWED_IMAGE_EXTS,
+                    missing_code="unsupported-image-format",
+                )
+            except (RuntimeError, FileNotFoundError) as e:
+                response.status = 400
+                return {"error": _simplify_task_error(e)}
+
+            task_callable = lambda: swap_face_video(
+                input_video,
+                target_face,
+                progress_callback=_on_progress,
+                stage_callback=_on_stage,
+                use_gpu=use_gpu,
             )
 
         # Use run_async instead of run to avoid blocking the request thread

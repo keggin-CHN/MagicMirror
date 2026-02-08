@@ -72,6 +72,9 @@
   "Completed": "Completed",
   "Failed": "Failed",
   "Cancelled": "Cancelled",
+  "Enable GPU acceleration for faster processing?": "Enable GPU acceleration for faster processing?",
+  "GPU acceleration can speed up video processing by 10-50x, but requires compatible graphics drivers.": "GPU acceleration can speed up video processing by 10-50x, but requires compatible graphics drivers.",
+  "Click OK to enable GPU, or Cancel to use CPU only.": "Click OK to enable GPU, or Cancel to use CPU only.",
   "downloadURL": "https://github.com/idootop/MagicMirror/releases/download/server-v1.0.0/server_{{type}}_{{arch}}.zip",
   "downloadTutorial": "https://thread-sphynx-f26.notion.site/MagicMirror-User-Guide-147aea89ebf680c189cdd76f5668261a",
   "aboutLink": "https://github.com/idootop/MagicMirror"
