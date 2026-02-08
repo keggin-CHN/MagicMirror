@@ -72,7 +72,7 @@ jobs:
           Write-Host "Version: $VERSION"
           $CONFIG = "{""version"":""$VERSION""}"
           Write-Host "Config JSON: $CONFIG"
-          pnpm tauri build -c $CONFIG -t ${{ matrix.target }} --bundles nsis --verbose
+          & node_modules/.bin/tauri build -c $CONFIG -t ${{ matrix.target }} --bundles nsis --verbose
           if ($LASTEXITCODE -ne 0) {
             Write-Host "Tauri build failed with exit code: $LASTEXITCODE"
             exit $LASTEXITCODE
